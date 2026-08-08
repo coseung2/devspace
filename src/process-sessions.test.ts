@@ -109,7 +109,7 @@ const defaultInteractive = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),
   command: `${node} -e "process.stdin.once('data', data => setTimeout(() => { console.log('default-input:' + data.toString().trim()); process.exit(0); }, 100))"`,
-  yieldTimeMs: 5,
+  yieldTimeMs: 1,
 });
 assert.equal(defaultInteractive.running, true);
 assert.ok(defaultInteractive.sessionId);

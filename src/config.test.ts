@@ -27,6 +27,14 @@ assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
 assert.equal(loadConfig(baseEnv).subagents, false);
 assert.equal(loadConfig(baseEnv).artifactsEnabled, false);
+assert.deepEqual(loadConfig(baseEnv).workspaceAliases, {});
+const aliasRoot = join(process.env.USERPROFILE ?? process.env.HOME ?? "", "projects");
+assert.equal(loadConfig({
+  ...baseEnv,
+  DEVSPACE_ALLOWED_ROOTS: aliasRoot,
+  DEVSPACE_WORKSPACE_ALIASES: JSON.stringify({ aura: "~/projects/aura", "aura-board": "~/projects/aura-board" }),
+}).workspaceAliases.aura, join(process.env.USERPROFILE ?? process.env.HOME ?? "", "projects", "aura"));
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PREVIEW_BASE_URL: "https://preview.example.com/" }).previewBaseUrl, "https://preview.example.com");
 assert.equal(loadConfig(baseEnv).artifactMaxFileBytes, 100 * 1024 * 1024);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_ARTIFACTS: "1" }).artifactsEnabled, true);
 assert.equal(
@@ -66,6 +74,14 @@ assert.throws(
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "invalid" }),
   /Invalid DEVSPACE_TOOL_MODE: invalid/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_WORKSPACE_ALIASES: "[]" }),
+  /Invalid workspaceAliases/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_WORKSPACE_ALIASES: JSON.stringify({ secret: "C:/outside" }) }),
+  /points outside allowed roots/,
 );
 
 assert.deepEqual(loadConfig(baseEnv).logging, {

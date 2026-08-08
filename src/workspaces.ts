@@ -73,7 +73,8 @@ export interface WorkspaceReadPath {
 }
 
 export interface OpenWorkspaceInput {
-  path: string;
+  path?: string;
+  alias?: string;
   mode?: WorkspaceMode;
   baseRef?: string;
 }
@@ -102,15 +103,17 @@ export class WorkspaceRegistry {
     openOptions: OpenWorkspaceOptions = {},
   ): Promise<WorkspaceContext> {
     const workspaceInput = typeof input === "string" ? { path: input } : input;
+    const resolvedPath = this.resolveInputPath(workspaceInput);
+    const resolvedInput = { ...workspaceInput, path: resolvedPath };
     const conversationScopeId = openOptions.conversationScopeId;
     if (!conversationScopeId || !this.store) {
-      return this.openNewWorkspace(workspaceInput);
+      return this.openNewWorkspace(resolvedInput);
     }
 
-    const projectKey = await this.conversationProjectKey(workspaceInput);
-    const mode = workspaceInput.mode ?? "checkout";
+    const projectKey = await this.conversationProjectKey(resolvedInput);
+    const mode = resolvedInput.mode ?? "checkout";
     if (mode === "worktree") {
-      const context = await this.openWorktreeWorkspace(workspaceInput.path, workspaceInput.baseRef);
+      const context = await this.openWorktreeWorkspace(resolvedPath, resolvedInput.baseRef);
       return {
         ...context,
         // A new worktree always has its own workspace-specific context.
@@ -131,7 +134,7 @@ export class WorkspaceRegistry {
     }
 
     const open = this.openConversationCheckout(
-      workspaceInput,
+      resolvedInput,
       conversationScopeId,
       targetKey,
     );
@@ -150,10 +153,10 @@ export class WorkspaceRegistry {
     const mode = options.mode ?? "checkout";
 
     if (mode === "worktree") {
-      return this.openWorktreeWorkspace(options.path, options.baseRef);
+      return this.openWorktreeWorkspace(this.resolveInputPath(options), options.baseRef);
     }
 
-    return this.openCheckoutWorkspace(options.path);
+    return this.openCheckoutWorkspace(this.resolveInputPath(options));
   }
 
   private async openConversationCheckout(
@@ -178,7 +181,7 @@ export class WorkspaceRegistry {
       this.store?.deleteConversationBinding(conversationScopeId, targetKey);
     }
 
-    const context = await this.openCheckoutWorkspace(input.path);
+    const context = await this.openCheckoutWorkspace(this.resolveInputPath(input));
     this.store?.setConversationBinding({
       conversationScopeId,
       targetKey,
@@ -220,7 +223,7 @@ export class WorkspaceRegistry {
   }
 
   private async conversationProjectKey(input: OpenWorkspaceInput): Promise<string> {
-    const path = assertAllowedPath(input.path, this.config.allowedRoots);
+    const path = assertAllowedPath(this.resolveInputPath(input), this.config.allowedRoots);
     return canonicalPath(path);
   }
 
@@ -331,6 +334,23 @@ export class WorkspaceRegistry {
     }
 
     return this.createWorkspaceContext({ root, mode: "checkout" });
+  }
+
+  resolveInputPath(input: OpenWorkspaceInput): string {
+    if (input.alias) {
+      const path = this.config.workspaceAliases[input.alias];
+      if (!path) {
+        const available = Object.keys(this.config.workspaceAliases).sort();
+        throw new Error(
+          `Unknown workspace alias: ${input.alias}.${available.length > 0 ? ` Available aliases: ${available.join(", ")}.` : " Configure workspaceAliases first."}`,
+        );
+      }
+      return path;
+    }
+    if (!input.path?.trim()) {
+      throw new Error("open_workspace requires either path or alias.");
+    }
+    return input.path;
   }
 
   private async openWorktreeWorkspace(path: string, baseRef: string | undefined): Promise<WorkspaceContext> {

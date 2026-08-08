@@ -13,7 +13,9 @@ export interface DevspaceUserConfig {
   host?: string;
   port?: number;
   allowedRoots?: string[];
+  workspaceAliases?: Record<string, string>;
   publicBaseUrl?: string | null;
+  previewBaseUrl?: string | null;
   allowedHosts?: string[];
   stateDir?: string;
   worktreeRoot?: string;

@@ -22,6 +22,7 @@ export interface StartCommandInput {
   rows?: number;
   yieldTimeMs?: number;
   maxOutputTokens?: number;
+  environment?: Record<string, string>;
 }
 
 export interface WriteStdinInput {
@@ -90,6 +91,7 @@ function terminalSize(value: number | undefined, fallback: number): number {
 function processEnvironment(input?: {
   workspaceId?: string;
   workspaceRoot?: string;
+  environment?: Record<string, string>;
 }): Record<string, string> {
   return {
     ...Object.fromEntries(
@@ -105,6 +107,7 @@ function processEnvironment(input?: {
     LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
     ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
     ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
+    ...(input?.environment ?? {}),
   };
 }
 
@@ -330,6 +333,7 @@ export class ProcessSessionManager {
       env: processEnvironment({
         workspaceId: input.workspaceId,
         workspaceRoot: input.workspaceRoot,
+        environment: input.environment,
       }),
       stdio: "pipe",
       windowsHide: true,
@@ -364,6 +368,7 @@ export class ProcessSessionManager {
         env: processEnvironment({
           workspaceId: input.workspaceId,
           workspaceRoot: input.workspaceRoot,
+          environment: input.environment,
         }),
         name: "xterm-256color",
         cols: session.columns,

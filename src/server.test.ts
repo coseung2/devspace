@@ -134,6 +134,27 @@ test("a host without conversation metadata receives normal explicit-workspace be
   assert.doesNotMatch(responseText(second), /conversation metadata/i);
 });
 
+test("open_workspace accepts configured aliases", async (t) => {
+  const context = await fixture(t);
+  const aliasConfig = { ...context.config, workspaceAliases: { aura: context.project } };
+  const aliasServer = createMcpServer(
+    aliasConfig,
+    new WorkspaceRegistry(aliasConfig),
+    createReviewCheckpointManager(),
+    new ProcessSessionManager(),
+    [],
+    [],
+  );
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "devspace-alias-test-client", version: "1.0.0" });
+  await Promise.all([client.connect(clientTransport), aliasServer.connect(serverTransport)]);
+  t.after(async () => { await client.close(); await aliasServer.close(); });
+
+  const result = await client.callTool({ name: "open_workspace", arguments: { alias: "aura" } });
+  assert.doesNotMatch(responseText(result), /Pass either path or alias/);
+  assert.match(responseText(result), /Root:/);
+});
+
 test("checkout reuse and context suppression survive a registry restart", async (t) => {
   const context = await fixture(t);
   const first = await callOpen(context.client, context.project, "chat-1");

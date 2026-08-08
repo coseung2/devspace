@@ -82,6 +82,50 @@ Run:
 npx @waishnav/devspace serve
 ```
 
+### Open projects by alias
+
+If the DevSpace host contains fixed projects such as Aura and Aura Board, add
+short names once:
+
+```bash
+devspace config set workspaceAlias aura /actual/devspace/projects/aura
+devspace config set workspaceAlias aura-board /actual/devspace/projects/aura-board
+```
+
+Replace `/actual/devspace/projects` with the actual project root on the
+DevSpace VM. The path is intentionally not hard-coded here because it belongs
+to the DevSpace installation, not to this package's documentation.
+
+The coding host can then call `open_workspace` with `{ "alias": "aura" }` or
+`{ "alias": "aura-board" }` instead of needing to know the VM filesystem path.
+
+### View an Aura development server from another computer
+
+The MCP URL and the browser preview URL can be different. Configure the public
+origin that points to this DevSpace VM (for example a Tailscale hostname):
+
+```bash
+devspace config set previewBaseUrl https://devspace.example.com
+```
+
+After opening Aura or Aura Board by alias, call `open_preview` with a command
+and port, for example:
+
+```json
+{
+  "workspaceId": "<workspaceId>",
+  "command": "npm run dev",
+  "port": 3000
+}
+```
+
+Use the returned URL from a laptop or desktop that can reach the configured
+preview origin. The application must listen on the port supplied to
+`open_preview`; DevSpace supplies `HOST=0.0.0.0`, `VITE_HOST=0.0.0.0`, and
+`PORT=<port>` to the process. The preview route is random and is not an
+authentication boundary, so use a private VPN/tunnel and do not expose it on a
+public internet endpoint without an access control layer.
+
 If your tunnel URL changes for one run, override it without rewriting config:
 
 ```bash

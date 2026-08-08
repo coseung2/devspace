@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { expandHomePath } from "./roots.js";
+import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
 import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
@@ -16,8 +16,10 @@ export interface ServerConfig {
   port: number;
   oauth: OAuthConfig;
   allowedRoots: string[];
+  workspaceAliases: Record<string, string>;
   allowedHosts: string[];
   publicBaseUrl: string;
+  previewBaseUrl?: string;
   toolMode: ToolMode;
   widgets: WidgetMode;
   stateDir: string;
@@ -58,6 +60,42 @@ function parseAllowedRoots(value: string | string[] | undefined): string[] {
 
   const roots = rawRoots.length > 0 ? rawRoots : [process.cwd()];
   return roots.map((root) => resolve(expandHomePath(root)));
+}
+
+function parseWorkspaceAliases(value: string | Record<string, string> | undefined): Record<string, string> {
+  let raw: unknown = value;
+  if (typeof value === "string") {
+    try {
+      raw = JSON.parse(value);
+    } catch {
+      throw new Error("Invalid DEVSPACE_WORKSPACE_ALIASES: expected a JSON object.");
+    }
+  }
+
+  if (raw === undefined) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Invalid workspaceAliases: expected an object mapping aliases to paths.");
+  }
+
+  const aliases: Record<string, string> = {};
+  for (const [alias, path] of Object.entries(raw)) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias)) {
+      throw new Error(`Invalid workspace alias: ${alias}`);
+    }
+    if (typeof path !== "string" || !path.trim()) {
+      throw new Error(`Workspace alias ${alias} must point to a non-empty path.`);
+    }
+    aliases[alias] = resolve(expandHomePath(path.trim()));
+  }
+  return aliases;
+}
+
+function assertWorkspaceAliasesAllowed(aliases: Record<string, string>, allowedRoots: string[]): void {
+  for (const [alias, path] of Object.entries(aliases)) {
+    if (!allowedRoots.some((root) => isPathInsideRoot(path, root))) {
+      throw new Error(`Workspace alias ${alias} points outside allowed roots: ${path}`);
+    }
+  }
 }
 
 function parseAllowedHosts(value: string | string[] | undefined, derivedHosts: string[]): string[] {
@@ -214,6 +252,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const publicBaseUrl = parsePublicBaseUrl(
     env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
+  const configuredPreviewBaseUrl = env.DEVSPACE_PREVIEW_BASE_URL ?? files.config.previewBaseUrl ?? undefined;
+  const allowedRoots = parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots);
+  const workspaceAliases = parseWorkspaceAliases(env.DEVSPACE_WORKSPACE_ALIASES ?? files.config.workspaceAliases);
+  assertWorkspaceAliasesAllowed(workspaceAliases, allowedRoots);
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -227,9 +269,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host,
     port,
     oauth: parseOAuthConfig(env, files.auth.ownerToken),
-    allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
+    allowedRoots,
+    workspaceAliases,
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
+    previewBaseUrl: configuredPreviewBaseUrl ? parsePublicBaseUrl(configuredPreviewBaseUrl) : undefined,
     toolMode: parseToolMode(env),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
     stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),

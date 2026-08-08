@@ -33,11 +33,51 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `HOST` | Local bind host. Defaults to `127.0.0.1`. |
 | `PORT` | Local port. Defaults to `7676`. |
 | `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
+| `DEVSPACE_WORKSPACE_ALIASES` | JSON object mapping short aliases such as `aura` to project paths. |
 | `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the server, without `/mcp`. |
+| `DEVSPACE_PREVIEW_BASE_URL` | Optional public origin used for browser preview URLs. Defaults to `DEVSPACE_PUBLIC_BASE_URL`. |
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
+
+Workspace aliases may also be persisted in `~/.devspace/config.json`:
+
+```json
+{
+  "allowedRoots": ["/actual/devspace/projects"],
+  "workspaceAliases": {
+    "aura": "/actual/devspace/projects/aura",
+    "aura-board": "/actual/devspace/projects/aura-board"
+  }
+}
+```
+
+Replace `/actual/devspace/projects` with the actual project root on the
+DevSpace VM before saving the file.
+
+Or configure them with the CLI:
+
+```bash
+devspace config set workspaceAlias aura /actual/devspace/projects/aura
+devspace config set workspaceAlias aura-board /actual/devspace/projects/aura-board
+```
+
+Replace `/actual/devspace/projects` with the actual DevSpace VM path before
+running these commands.
+
+`open_workspace` accepts either `path` or `alias`. Alias targets still have to
+be inside `DEVSPACE_ALLOWED_ROOTS`; the alias is only a convenience name, not a
+permission bypass. Preview URLs contain a random per-preview access token. The
+first browser request turns it into a scoped HttpOnly cookie so relative asset
+requests continue to work; treat the URL like a secret and keep the preview
+origin on a private network.
+
+For browser previews, set `DEVSPACE_PREVIEW_BASE_URL` to the URL by which other
+devices reach this host. Then call `open_preview` with the workspace ID, a dev
+command such as `npm run dev`, and its port. DevSpace binds the process to
+`0.0.0.0`, proxies the port under a private random preview path, and returns a
+URL such as `https://preview.example.com/preview/pv_.../`.
 
 ## Native Artifact Download
 

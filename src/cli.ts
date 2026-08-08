@@ -213,7 +213,7 @@ async function serve(): Promise<void> {
 
   const { createServer } = await import("./server.js");
   const config = loadConfig();
-  const { app, close, localAgentProviders } = createServer(config);
+  const { app, close, localAgentProviders, attachPreviewUpgrade } = createServer(config);
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
     console.log(`public base url: ${config.publicBaseUrl}`);
@@ -228,6 +228,7 @@ async function serve(): Promise<void> {
       console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
     }
   });
+  attachPreviewUpgrade(httpServer);
 
   let shuttingDown = false;
   const shutdown = async () => {
@@ -281,19 +282,25 @@ function runConfigCommand(args: string[]): void {
   if (subcommand !== "set") {
     throw new Error(`Unknown config command: ${subcommand}`);
   }
-  if (key !== "publicBaseUrl") {
-    throw new Error("Only `devspace config set publicBaseUrl <url|null>` is supported right now.");
-  }
-
   const value = rest.join(" ").trim();
-  if (!value) {
-    throw new Error("Missing publicBaseUrl value.");
+  if (key === "publicBaseUrl" || key === "previewBaseUrl") {
+    if (!value) throw new Error(`Missing ${key} value.`);
+    writeDevspaceConfig({
+      ...files.config,
+      [key]: normalizeOptionalPublicBaseUrl(value),
+    });
+  } else if (key === "workspaceAlias") {
+    const [alias, ...pathParts] = rest;
+    const target = pathParts.join(" ").trim();
+    if (!alias || !target) throw new Error("Usage: devspace config set workspaceAlias <alias> <path>");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias)) throw new Error(`Invalid workspace alias: ${alias}`);
+    writeDevspaceConfig({
+      ...files.config,
+      workspaceAliases: { ...files.config.workspaceAliases, [alias]: target },
+    });
+  } else {
+    throw new Error("Supported keys: publicBaseUrl, previewBaseUrl, workspaceAlias.");
   }
-
-  writeDevspaceConfig({
-    ...files.config,
-    publicBaseUrl: normalizeOptionalPublicBaseUrl(value),
-  });
   console.log(`Updated ${files.configPath}`);
 }
 
@@ -309,6 +316,8 @@ function printHelp(): void {
       "  devspace doctor          Show config, runtime, and native dependency status",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
+      "  devspace config set previewBaseUrl <url|null>",
+      "  devspace config set workspaceAlias <alias> <path>",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
       "  devspace agents show <id>",
