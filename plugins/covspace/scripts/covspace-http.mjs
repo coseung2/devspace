@@ -73,7 +73,18 @@ async function loadOAuthTokens() {
       if (grant?.digest && grant.expiresAt > now) oauthAccessTokens.set(grant.digest, grant);
     }
     for (const grant of stored.refreshTokens || []) {
-      if (grant?.digest && grant.expiresAt > now && grant.familyId) oauthRefreshTokens.set(grant.digest, grant);
+      if (grant?.digest && grant.expiresAt > now) {
+        const familyId = grant.familyId || crypto.randomUUID();
+        const migrated = { ...grant, familyId };
+        oauthRefreshTokens.set(grant.digest, migrated);
+        if (!oauthRefreshFamilies.has(familyId)) {
+          oauthRefreshFamilies.set(familyId, {
+            clientId: migrated.clientId,
+            currentDigest: grant.digest,
+            expiresAt: migrated.expiresAt,
+          });
+        }
+      }
     }
     for (const tombstone of stored.refreshTokenTombstones || []) {
       if (tombstone?.digest && tombstone.expiresAt > now && tombstone.familyId) oauthRefreshTokenTombstones.set(tombstone.digest, tombstone);

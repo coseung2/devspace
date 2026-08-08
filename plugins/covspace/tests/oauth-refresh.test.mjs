@@ -333,3 +333,28 @@ test("rejects oversized unauthenticated OAuth bodies without terminating the ser
   assert.equal(response.status, 413);
   assert.equal((await fetch(`${server.baseUrl}/healthz`)).status, 200);
 });
+
+test("migrates persisted refresh tokens created before token families existed", async (t) => {
+  const temp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "covspace-oauth-legacy-"));
+  const stateDir = path.join(temp, "state");
+  const root = path.join(temp, "projects");
+  const port = await freePort();
+  let server = await startServer({ port, stateDir, root });
+  t.after(async () => {
+    await stopServer(server.child);
+    await fs.promises.rm(temp, { recursive: true, force: true });
+  });
+  const client = await registerClient(server.baseUrl);
+  const auth = await authorize(server.baseUrl, client.client_id);
+  const initial = await exchangeCode(server.baseUrl, client.client_id, auth.code, auth.verifier);
+  await stopServer(server.child);
+  const tokenFile = path.join(stateDir, "oauth-tokens.json");
+  const stored = JSON.parse(await fs.promises.readFile(tokenFile, "utf8"));
+  stored.refreshTokens = stored.refreshTokens.map(({ familyId, ...grant }) => grant);
+  delete stored.refreshFamilies;
+  await fs.promises.writeFile(tokenFile, `${JSON.stringify(stored, null, 2)}\n`);
+  server = await startServer({ port, stateDir, root });
+  const migrated = await refresh(server.baseUrl, client.client_id, initial.refresh_token);
+  assert.equal(migrated.status, 200);
+  assert.ok(migrated.body.refresh_token);
+});

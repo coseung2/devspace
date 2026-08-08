@@ -1,6 +1,6 @@
 {
   "name": "covspace",
-  "version": "0.2.1+codex.20260808130000",
+  "version": "0.2.1+codex.20260808131500",
   "description": "DevSpace-style workspace-scoped MCP access to the Covspace OCI VM.",
   "author": {
     "name": "Local developer"
