@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "covspace": {
+      "type": "http",
+      "url": "https://testauram-covspace.tail4cbe57.ts.net/mcp",
+      "auth": {
+        "type": "oauth2"
+      }
+    }
+  }
+}

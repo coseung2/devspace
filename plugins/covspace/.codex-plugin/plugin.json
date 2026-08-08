@@ -1,0 +1,30 @@
+{
+  "name": "covspace",
+  "version": "0.2.1+codex.20260808130000",
+  "description": "DevSpace-style workspace-scoped MCP access to the Covspace OCI VM.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Covspace",
+    "shortDescription": "Work with the remote Covspace workspace.",
+    "longDescription": "Open workspace-scoped repositories in /home/covspace/projects through a VM-resident Streamable HTTP MCP server over Tailscale, without changing DevSpace.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Remote workspace",
+      "Workspace sessions",
+      "Read",
+      "Write",
+      "Search",
+      "Bash",
+      "Git"
+    ],
+    "defaultPrompt": [
+      "Open a Covspace repository as a workspace.",
+      "Inspect, edit, search, run commands, and use Git within the opened workspace."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

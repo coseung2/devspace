@@ -1,0 +1,10 @@
+{
+  "name": "covspace-plugin",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check scripts/covspace-http.mjs && node --check scripts/covspace-mcp.mjs",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
