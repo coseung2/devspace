@@ -58,12 +58,6 @@ import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
-import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
-import {
-  formatLocalAgentProviderAvailabilitySummary,
-  getLocalAgentProviderAvailabilitySnapshot,
-  type LocalAgentProviderAvailability,
-} from "./local-agent-availability.js";
 
 type Transport = StreamableHTTPServerTransport;
 // MCP clients can reconnect without closing the previous transport. Bound stale
@@ -94,7 +88,6 @@ const SHELL_TOOL_ANNOTATIONS = {
 interface RunningServer {
   app: ReturnType<typeof createMcpExpressApp>;
   config: ServerConfig;
-  localAgentProviders: LocalAgentProviderAvailability[];
   attachPreviewUpgrade(httpServer: HttpServer): void;
   close(): Promise<void>;
 }
@@ -217,26 +210,6 @@ function serverInstructions(config: ServerConfig): string {
   return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. Use open_preview for an Aura or Aura Board development server when the user needs to view it from another device. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
-function formatVisibleAgent(agent: {
-  name: string;
-  provider: string;
-  model?: string;
-  thinking?: string;
-  providerAvailable?: boolean;
-  providerUnavailableReason?: string;
-}): string {
-  const model = agent.model ? `, model ${agent.model}` : "";
-  const thinking = agent.thinking ? `, thinking ${agent.thinking}` : "";
-  const availability = agent.providerAvailable === false
-    ? `, unavailable: ${agent.providerUnavailableReason ?? "provider unavailable"}`
-    : "";
-  return `${agent.name} (${agent.provider}${model}${thinking}${availability})`;
-}
-
-function formatUnavailableAgentProvider(provider: LocalAgentProviderAvailability): string {
-  return `${provider.name} (${provider.reason ?? "unavailable"})`;
-}
-
 function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   return {
     result: z
@@ -257,22 +230,6 @@ const workspaceSkillOutputSchema = z.object({
 const workspaceAgentsFileOutputSchema = z.object({
   path: z.string(),
   content: z.string(),
-});
-
-const workspaceLocalAgentOutputSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  provider: z.string(),
-  model: z.string().optional(),
-  thinking: z.string().optional(),
-  providerAvailable: z.boolean().optional(),
-  providerUnavailableReason: z.string().optional(),
-});
-
-const workspaceLocalAgentProviderOutputSchema = z.object({
-  name: z.string(),
-  available: z.boolean(),
-  reason: z.string().optional(),
 });
 
 const workspaceAvailableAgentsFileOutputSchema = z.object({
@@ -712,7 +669,6 @@ export function createMcpServer(
   workspaces: WorkspaceRegistry,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
-  localAgentProviders: LocalAgentProviderAvailability[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   previewSessions = new PreviewSessionManager(processSessions),
 ): McpServer {
@@ -807,8 +763,6 @@ export function createMcpServer(
         agentsFiles: z.array(workspaceAgentsFileOutputSchema).optional(),
         availableAgentsFiles: z.array(workspaceAvailableAgentsFileOutputSchema).optional(),
         skills: z.array(workspaceSkillOutputSchema).optional(),
-        agentProviders: z.array(workspaceLocalAgentProviderOutputSchema).optional(),
-        agents: z.array(workspaceLocalAgentOutputSchema).optional(),
         skillDiagnostics: z.array(z.unknown()).optional(),
         instruction: z.string(),
       },
@@ -840,16 +794,6 @@ export function createMcpServer(
           description: skill.description,
           path: formatPathForPrompt(skill.filePath),
         }));
-      const cardAgentProviders = config.subagents ? localAgentProviders : [];
-      const cardAgents = workspace.agentProfiles.map((profile) => {
-        const summary = summarizeLocalAgentProfile(profile);
-        const availability = cardAgentProviders.find((provider) => provider.name === summary.provider);
-        return {
-          ...summary,
-          providerAvailable: availability?.available,
-          providerUnavailableReason: availability?.reason,
-        };
-      });
       const cardAgentsFiles = agentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
         content: file.content,
@@ -858,8 +802,6 @@ export function createMcpServer(
         path: formatAgentsPath(file.path, workspace.root),
       }));
       const visibleSkills = includeBootstrapContext ? cardSkills : [];
-      const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
-      const visibleAgents = includeBootstrapContext ? cardAgents : [];
       const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
       const cardInstruction = config.skillsEnabled
@@ -869,10 +811,10 @@ export function createMcpServer(
         ? [
             `Workspace already open as ${workspace.id}.`,
             "Reuse this workspaceId for subsequent tool calls. This is the same checkout previously opened for this project in this conversation.",
-            "Continue following the project instructions, nested instruction files, skills, agent profiles, and diagnostics previously provided for this workspace. They remain the active workspace context and are not repeated here.",
+            "Continue following the project instructions, nested instruction files, skills, and diagnostics previously provided for this workspace. They remain the active workspace context and are not repeated here.",
           ].join("\n\n")
         : workspace.mode === "worktree"
-          ? "Use this workspaceId for subsequent tool calls. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for this isolated worktree."
+          ? "Use this workspaceId for subsequent tool calls. Follow the project instructions, nested instruction files, skills, and diagnostics returned for this isolated worktree."
           : cardInstruction;
       const resultContent: ToolContent[] = [
         {
@@ -893,15 +835,6 @@ export function createMcpServer(
               : undefined,
             visibleSkills.length > 0
               ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
-              : undefined,
-            visibleAgentProviders.some((provider) => provider.available)
-              ? `Available subagent providers: ${visibleAgentProviders.filter((provider) => provider.available).map((provider) => provider.name).join(", ")}`
-              : undefined,
-            visibleAgentProviders.some((provider) => !provider.available)
-              ? `Unavailable subagent providers: ${visibleAgentProviders.filter((provider) => !provider.available).map(formatUnavailableAgentProvider).join(", ")}`
-              : undefined,
-            visibleAgents.length > 0
-              ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
@@ -931,16 +864,13 @@ export function createMcpServer(
             agentsFiles: cardAgentsFiles,
             availableAgentsFiles: cardAvailableAgentsFiles,
             skills: cardSkills,
-            agentProviders: cardAgentProviders,
-            agents: cardAgents,
             instruction: cardInstruction,
             summary: {
               mode: workspace.mode,
               agentsFiles: cardAgentsFiles.length,
               availableAgentsFiles: cardAvailableAgentsFiles.length,
               skills: cardSkills.length,
-              agentProviders: cardAgentProviders.length,
-              agents: cardAgents.length,
+              skillDiagnostics: workspace.skillDiagnostics.length,
             },
           },
         },
@@ -955,8 +885,6 @@ export function createMcpServer(
                 agentsFiles: loadedAgentsFiles,
                 availableAgentsFiles: availableAgentsFileOutputs,
                 skills: visibleSkills,
-                agentProviders: visibleAgentProviders,
-                agents: visibleAgents,
                 skillDiagnostics: workspace.skillDiagnostics,
               }
             : {}),
@@ -1778,9 +1706,6 @@ export function createServer(
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
   const previewSessions = new PreviewSessionManager(processSessions);
-  const localAgentProviders = config.subagents
-    ? getLocalAgentProviderAvailabilitySnapshot()
-    : [];
 
   const logSessionCloseResults = (
     reason: "idle_timeout" | "server_shutdown",
@@ -1812,7 +1737,6 @@ export function createServer(
       .then((results) => logSessionCloseResults("idle_timeout", results));
   }, MCP_SESSION_CLEANUP_INTERVAL_MS);
   sessionCleanupTimer.unref();
-
   if (config.logging.trustProxy) {
     app.set("trust proxy", true);
   }
@@ -1952,7 +1876,6 @@ export function createServer(
           workspaces,
           reviewCheckpoints,
           processSessions,
-          localAgentProviders,
           incomingArtifactAdapters,
           previewSessions,
         );
@@ -1978,7 +1901,6 @@ export function createServer(
   return {
     app,
     config,
-    localAgentProviders,
     attachPreviewUpgrade: (httpServer) => {
       httpServer.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {
         previewSessions.upgrade(request, socket, head);
@@ -2008,7 +1930,7 @@ async function isMainModule(): Promise<boolean> {
 }
 
 if (await isMainModule()) {
-  const { app, config, close, localAgentProviders, attachPreviewUpgrade } = createServer();
+  const { app, config, close, attachPreviewUpgrade } = createServer();
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(
       `devspace listening on http://${config.host}:${config.port}/mcp`,
@@ -2025,9 +1947,6 @@ if (await isMainModule()) {
         ? "enabled"
         : `unsupported on ${process.platform}`;
     console.log(`native artifact download: ${artifactDownloadStatus}`);
-    if (config.subagents) {
-      console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
-    }
   });
   attachPreviewUpgrade(httpServer);
 

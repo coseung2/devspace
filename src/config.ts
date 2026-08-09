@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import type { LoggingConfig, LogFormat, LogLevel } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
-import { devspaceAgentsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
+import { devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
 
 export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
@@ -29,8 +29,6 @@ export interface ServerConfig {
   skillsEnabled: boolean;
   skillPaths: string[];
   devspaceSkillsDir: string;
-  devspaceAgentsDir: string;
-  subagents: boolean;
   agentDir: string;
   logging: LoggingConfig;
 }
@@ -290,11 +288,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
     devspaceSkillsDir: devspaceSkillsDir(env),
-    devspaceAgentsDir: devspaceAgentsDir(env),
-    subagents:
-      env.DEVSPACE_SUBAGENTS === undefined
-        ? files.config.subagents === true
-        : parseBoolean(env.DEVSPACE_SUBAGENTS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
     logging: parseLoggingConfig(env),
   };

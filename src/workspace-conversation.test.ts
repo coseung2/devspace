@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -23,7 +23,7 @@ test("a conversation reuses its checkout context", async (t) => {
   assert.deepEqual(second.availableAgentsFiles, first.availableAgentsFiles);
   assert.deepEqual(second.workspace.skills, first.workspace.skills);
   assert.deepEqual(second.workspace.skillDiagnostics, first.workspace.skillDiagnostics);
-  assert.deepEqual(second.workspace.agentProfiles, first.workspace.agentProfiles);
+  assert.equal("agentProfiles" in second.workspace, false);
 });
 
 test("different conversations receive separate checkout workspaces", async (t) => {
@@ -149,44 +149,6 @@ test("checkout reuse survives a registry restart", async (t) => {
   });
 
   assert.equal(restored.workspace.id, first.workspace.id);
-});
-
-test("a failed first context load does not consume bootstrap", async (t) => {
-  const { project, registry } = await fixture(t);
-  const agentsDir = join(project, ".devspace", "agents");
-  const backupDir = join(project, ".devspace", "agents-backup");
-
-  await breakAgentsDirectory(agentsDir, backupDir);
-  try {
-    await assert.rejects(
-      () => registry.openWorkspace(project, { conversationScopeId: "chat-1" }),
-      /directory|ENOTDIR/i,
-    );
-  } finally {
-    await restoreAgentsDirectory(agentsDir, backupDir);
-  }
-
-  const successfulOpen = await registry.openWorkspace(project, { conversationScopeId: "chat-1" });
-});
-
-test("a context-loading failure preserves a valid checkout binding", async (t) => {
-  const { project, registry } = await fixture(t);
-  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-1" });
-  const agentsDir = join(project, ".devspace", "agents");
-  const backupDir = join(project, ".devspace", "agents-backup");
-
-  await breakAgentsDirectory(agentsDir, backupDir);
-  try {
-    await assert.rejects(
-      () => registry.openWorkspace(project, { conversationScopeId: "chat-1" }),
-      /directory|ENOTDIR/i,
-    );
-  } finally {
-    await restoreAgentsDirectory(agentsDir, backupDir);
-  }
-
-  const recovered = await registry.openWorkspace(project, { conversationScopeId: "chat-1" });
-  assert.equal(recovered.workspace.id, first.workspace.id);
 });
 
 test("a deleted checkout is replaced with a new workspace", async (t) => {
@@ -450,16 +412,6 @@ async function fixture(
     openStore,
     closeStore,
   };
-}
-
-async function breakAgentsDirectory(agentsDir: string, backupDir: string): Promise<void> {
-  await rename(agentsDir, backupDir);
-  await writeFile(agentsDir, "not a directory\n");
-}
-
-async function restoreAgentsDirectory(agentsDir: string, backupDir: string): Promise<void> {
-  await rm(agentsDir, { force: true });
-  await rename(backupDir, agentsDir);
 }
 
 async function initializeGitRepository(root: string): Promise<void> {

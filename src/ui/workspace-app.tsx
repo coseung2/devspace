@@ -20,7 +20,7 @@ import {
   type ToolName,
   type ToolResultCard,
 } from "./card-types.js";
-import { getProviderLogo, renderIcon, toolIcons, type ToolIcon } from "./icons.js";
+import { renderIcon, toolIcons, type ToolIcon } from "./icons.js";
 import {
   getToolDisplay,
   getToolHeaderSummary,
@@ -521,51 +521,6 @@ function renderWorkspacePayload(container: HTMLElement, card: ToolResultCard): v
     appendWorkspaceSkills(rows, skills);
   }
 
-  const providers = card.agentProviders ?? [];
-  const agents = card.agents ?? [];
-  const agentChips: WorkspaceChip[] = agents.map((agent) => {
-    const name = agent.name ?? "Unnamed agent";
-    const providerName = agent.provider?.trim();
-    const unavailable = agent.providerAvailable === false;
-    const title = [
-      agent.description,
-      providerName ? `Provider: ${providerName}` : undefined,
-      agent.model ? `Model: ${agent.model}` : undefined,
-      agent.thinking ? `Thinking: ${agent.thinking}` : undefined,
-      unavailable
-        ? agent.providerUnavailableReason ?? "Provider unavailable"
-        : undefined,
-    ].filter((value): value is string => Boolean(value)).join("\n");
-    return {
-      label: name,
-      logo: providerName ? getProviderLogo(providerName) : undefined,
-      profile: true,
-      tone: unavailable ? "muted" as const : undefined,
-      title: title || undefined,
-    };
-  });
-  const providerChips: WorkspaceChip[] = providers.map((provider) => {
-    const name = provider.name?.trim() || "Unknown provider";
-    const unavailable = provider.available === false;
-    const logo = getProviderLogo(name);
-    return {
-      label: name,
-      logo,
-      bareLogo: Boolean(logo),
-      ariaLabel: name,
-      tone: unavailable ? "muted" as const : undefined,
-      title: unavailable ? provider.reason ?? "Provider unavailable" : name,
-    };
-  });
-
-  if (agentChips.length > 0) {
-    const chipList = renderWorkspaceChips([...agentChips, ...providerChips]);
-    chipList.classList.add("workspace-agents-list");
-    appendWorkspaceRow(rows, "Agents", chipList, toolIcons.agents, "workspace-agents-row");
-  } else if (providerChips.length > 0) {
-    appendWorkspaceChipRow(rows, "Providers", providerChips, toolIcons.providers);
-  }
-
   if (rows.childElementCount > 0) details.append(rows);
 
   if (details.childElementCount === 0) {
@@ -577,12 +532,7 @@ function renderWorkspacePayload(container: HTMLElement, card: ToolResultCard): v
 
 interface WorkspaceChip {
   label: string;
-  logo?: string;
-  profile?: boolean;
-  bareLogo?: boolean;
-  ariaLabel?: string;
   title?: string;
-  tone?: "muted";
 }
 
 interface WorkspaceInstruction {
@@ -831,37 +781,11 @@ function renderWorkspaceRowIcon(icon: ToolIcon): HTMLElement {
 function renderWorkspaceChips(chips: WorkspaceChip[]): HTMLElement {
   const list = element("span", { className: "workspace-chip-list" });
   for (const chip of chips) {
-    const bareLogo = Boolean(chip.bareLogo && chip.logo);
     const item = element("span", {
-      className: [
-        bareLogo
-          ? "workspace-provider-logo"
-          : chip.profile
-          ? "workspace-agent-profile"
-          : "workspace-chip",
-        chip.tone,
-      ].filter(Boolean).join(" "),
+      className: "workspace-chip",
       title: chip.title,
     });
-    if (bareLogo) {
-      item.setAttribute("role", "img");
-      item.setAttribute("aria-label", chip.ariaLabel ?? chip.label);
-    }
-    if (chip.logo) {
-      const logo = document.createElement("img");
-      logo.className = bareLogo
-        ? "workspace-provider-logo-image"
-        : chip.profile
-        ? "workspace-agent-profile-logo"
-        : "workspace-chip-logo";
-      logo.src = chip.logo;
-      logo.alt = "";
-      logo.setAttribute("aria-hidden", "true");
-      item.append(logo);
-    }
-    if (!bareLogo) {
-      item.append(element("span", { className: "workspace-chip-label", text: chip.label }));
-    }
+    item.append(element("span", { className: "workspace-chip-label", text: chip.label }));
     list.append(item);
   }
   return list;

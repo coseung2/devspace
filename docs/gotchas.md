@@ -216,20 +216,8 @@ DevSpace looks in standard Agent Skills locations:
 
 It also checks compatibility and custom paths:
 
-- the bundled `subagent-delegation` skill when `DEVSPACE_SUBAGENTS=1`, unless `~/.devspace/skills/subagent-delegation/SKILL.md` exists
 - `DEVSPACE_AGENT_DIR/skills`, defaulting to `~/.codex/skills`
 - additional paths from `DEVSPACE_SKILL_PATHS`
-
-When `DEVSPACE_SUBAGENTS=1`, DevSpace loads agent profiles from
-`~/.devspace/agents/*.md` and project `.devspace/agents/*.md`, then exposes a
-compact profile catalog through `open_workspace`. The bundled
-`subagent-delegation` skill keeps the model-facing workflow to
-`devspace agents ls`, `devspace agents run`, and `devspace agents show`.
-`devspace agents ls` lists existing subagent sessions, not profile
-definitions.
-
-Packaged agent profile examples under `examples/agents/` are starter templates.
-Copy or adapt them into one of the active profile directories before use.
 
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 

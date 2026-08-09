@@ -26,14 +26,28 @@ test("open_workspace keeps lifecycle flags out of model output and preserves com
   const outputProperties = (openTool?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
   assert.equal(outputProperties && "workspaceReused" in outputProperties, false);
   assert.equal(outputProperties && "includeBootstrapContext" in outputProperties, false);
+  assert.equal(outputProperties && "agentProviders" in outputProperties, false);
+  assert.equal(outputProperties && "agents" in outputProperties, false);
 
   const firstStructured = structuredContent(first);
   assert.equal(firstStructured.workspaceId, structuredContent(repeated).workspaceId);
   assert.ok(Array.isArray(firstStructured.agentsFiles));
   assert.ok(Array.isArray(firstStructured.availableAgentsFiles));
   assert.ok(Array.isArray(firstStructured.skills));
-  assert.ok(Array.isArray(firstStructured.agentProviders));
-  assert.ok(Array.isArray(firstStructured.agents));
+  assert.equal(
+    (firstStructured.agentsFiles as Array<{ content: string }>).some((file) => file.content === "project instructions\n"),
+    true,
+  );
+  assert.equal(
+    (firstStructured.availableAgentsFiles as Array<{ path: string }>).some((file) => file.path === "nested/AGENTS.md"),
+    true,
+  );
+  assert.equal(
+    (firstStructured.skills as Array<{ name: string }>).some((skill) => skill.name === "project-skill"),
+    true,
+  );
+  assert.equal("agentProviders" in firstStructured, false);
+  assert.equal("agents" in firstStructured, false);
   assert.ok(Array.isArray(firstStructured.skillDiagnostics));
   assert.equal("workspaceReused" in firstStructured, false);
   assert.equal("includeBootstrapContext" in firstStructured, false);
@@ -61,8 +75,8 @@ test("open_workspace keeps lifecycle flags out of model output and preserves com
   assert.ok(Array.isArray(card.agentsFiles));
   assert.ok(Array.isArray(card.availableAgentsFiles));
   assert.ok(Array.isArray(card.skills));
-  assert.ok(Array.isArray(card.agentProviders));
-  assert.ok(Array.isArray(card.agents));
+  assert.equal("agentProviders" in card, false);
+  assert.equal("agents" in card, false);
 });
 
 test("concurrent checkout opens return one full context and one reuse instruction", async (t) => {
@@ -98,8 +112,8 @@ test("new worktrees always receive a fresh workspace and complete worktree conte
     assert.ok(Array.isArray(structured.agentsFiles));
     assert.ok(Array.isArray(structured.availableAgentsFiles));
     assert.ok(Array.isArray(structured.skills));
-    assert.ok(Array.isArray(structured.agentProviders));
-    assert.ok(Array.isArray(structured.agents));
+    assert.equal("agentProviders" in structured, false);
+    assert.equal("agents" in structured, false);
     assert.ok(Array.isArray(structured.skillDiagnostics));
     assert.match(responseText(result), /Opened isolated worktree workspace/);
   }
@@ -143,7 +157,6 @@ test("open_workspace accepts configured aliases", async (t) => {
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
     [],
-    [],
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-alias-test-client", version: "1.0.0" });
@@ -168,7 +181,6 @@ test("checkout reuse and context suppression survive a registry restart", async 
     new WorkspaceRegistry(context.config, restoredStore),
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
-    [],
     [],
   );
   const [restoredClientTransport, restoredServerTransport] = InMemoryTransport.createLinkedPair();
@@ -212,17 +224,19 @@ async function fixture(t: TestContext, options: { git?: boolean } = {}): Promise
   const agentDir = join(root, "agent");
   const stateDir = join(root, ".state");
 
-  await mkdir(join(project, ".devspace", "agents"), { recursive: true });
+  await mkdir(join(project, "nested"), { recursive: true });
+  await mkdir(join(project, ".agents", "skills", "project-skill"), { recursive: true });
   await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "AGENTS.md"), "global instructions\n");
   await writeFile(join(project, "AGENTS.md"), "project instructions\n");
-  await writeFile(join(project, ".devspace", "agents", "reviewer.md"), [
+  await writeFile(join(project, "nested", "AGENTS.md"), "nested instructions\n");
+  await writeFile(join(project, ".agents", "skills", "project-skill", "SKILL.md"), [
     "---",
-    "name: reviewer",
-    "description: Reviews project changes.",
-    "provider: codex",
+    "name: project-skill",
+    "description: Project skill description.",
     "---",
-    "Review changes.",
+    "",
+    "# Project Skill",
   ].join("\n"));
 
   if (options.git) {
@@ -251,7 +265,6 @@ async function fixture(t: TestContext, options: { git?: boolean } = {}): Promise
     workspaces,
     createReviewCheckpointManager(),
     new ProcessSessionManager(),
-    [],
     [],
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
