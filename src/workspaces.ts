@@ -13,10 +13,6 @@ import {
   type LoadedSkills,
   type SkillReadResolution,
 } from "./skills.js";
-import {
-  loadLocalAgentProfiles,
-  type LocalAgentProfile,
-} from "./local-agent-profiles.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -44,7 +40,6 @@ export interface Workspace {
   worktree?: WorkspaceWorktree;
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
-  agentProfiles: LocalAgentProfile[];
   activatedSkillDirs: Set<string>;
 }
 
@@ -115,7 +110,6 @@ export class WorkspaceRegistry {
             }
           : undefined,
       ...this.loadSkillsForWorkspace(root),
-      agentProfiles: [],
       activatedSkillDirs: new Set(),
     };
     this.store?.touchSession(workspaceId);
@@ -206,7 +200,6 @@ export class WorkspaceRegistry {
       sourceRoot: input.sourceRoot,
       worktree: input.worktree,
       ...this.loadSkillsForWorkspace(input.root),
-      agentProfiles: await loadLocalAgentProfiles(this.config, input.root),
       activatedSkillDirs: new Set(),
     };
 
