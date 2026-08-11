@@ -42,6 +42,7 @@ export interface ToolResultCard {
     managed?: boolean;
   };
   status?: string;
+  error?: string;
   summary?: Record<string, unknown>;
   files?: Array<{
     path?: string;
@@ -150,6 +151,8 @@ export function summaryNumber(
 }
 
 export function isExpandableCard(card: ToolResultCard): boolean {
+  if (card.status === "error") return Boolean(card.error || card.payload);
+
   if (card.tool === "open_workspace") {
     return (
       Number(card.summary?.agentsFiles ?? 0) > 0 ||
@@ -169,6 +172,7 @@ export function isExpandableCard(card: ToolResultCard): boolean {
 }
 
 export function isInitiallyExpandedCard(card: ToolResultCard): boolean {
+  if (card.status === "error") return isExpandableCard(card);
   if (card.tool === "open_workspace") return isExpandableCard(card);
   if (isReviewTool(card.tool)) return isExpandableCard(card);
   if (isPatchTool(card.tool)) {

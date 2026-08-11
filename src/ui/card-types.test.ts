@@ -91,3 +91,13 @@ test("a workspace card expands when it contains available instruction files", ()
 test("an empty workspace card stays collapsed", () => {
   assert.equal(isExpandableCard({ tool: "open_workspace" }), false);
 });
+
+test("an error card opens immediately when it has a recovery message", () => {
+  const card = {
+    tool: "open_workspace" as const,
+    status: "error",
+    error: "Unknown workspace alias: missing-project.",
+  };
+  assert.equal(isExpandableCard(card), true);
+  assert.equal(isInitiallyExpandedCard(card), true);
+});

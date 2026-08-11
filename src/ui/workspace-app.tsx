@@ -89,12 +89,15 @@ async function boot(): Promise<void> {
     }
 
     const nextCard = { ...structured, tool };
+    const resultError = nextCard.status === "error"
+      ? nextCard.error || payloadText(nextCard.payload) || "Tool failed without an error message."
+      : null;
     card = nextCard;
-    expanded = isInitiallyExpandedCard(nextCard);
+    expanded = Boolean(resultError) || isInitiallyExpandedCard(nextCard);
     reviewFilesExpanded = false;
     openWorkspaceInstructionKey = null;
     showAvailableWorkspaceInstructions = false;
-    errorMessage = null;
+    errorMessage = resultError;
     render();
   };
 

@@ -109,6 +109,8 @@ interface ToolDefinitionMeta extends Record<string, unknown> {
     resourceUri: string;
     visibility: ["model"];
   };
+  "openai/toolInvocation/invoking": string;
+  "openai/toolInvocation/invoked": string;
 }
 
 type EmptyToolDefinitionMeta = Record<string, unknown> & {
@@ -118,6 +120,17 @@ type EmptyToolDefinitionMeta = Record<string, unknown> & {
 interface ToolWidgetDescriptorMeta {
   _meta: ToolDefinitionMeta | EmptyToolDefinitionMeta;
 }
+
+const toolWidgetStatus: Record<ToolWidgetKind, { invoking: string; invoked: string }> = {
+  workspace: { invoking: "Opening workspace...", invoked: "Workspace ready" },
+  read: { invoking: "Reading file...", invoked: "File ready" },
+  write: { invoking: "Writing file...", invoked: "File written" },
+  edit: { invoking: "Applying changes...", invoked: "Changes applied" },
+  search: { invoking: "Searching workspace...", invoked: "Search complete" },
+  directory: { invoking: "Listing directory...", invoked: "Directory ready" },
+  shell: { invoking: "Running command...", invoked: "Command complete" },
+  show_changes: { invoking: "Preparing changes...", invoked: "Changes ready" },
+};
 
 function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
   switch (mode) {
@@ -136,12 +149,16 @@ function toolWidgetDescriptorMeta(
 ): ToolWidgetDescriptorMeta {
   if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
 
+  const status = toolWidgetStatus[kind];
+
   return {
     _meta: {
       ui: {
         resourceUri: WORKSPACE_APP_URI,
         visibility: ["model"],
       },
+      "openai/toolInvocation/invoking": status.invoking,
+      "openai/toolInvocation/invoked": status.invoked,
     },
   };
 }
@@ -303,6 +320,31 @@ function logFailedToolResponse(
 
 function textBlock(text: string): ToolContent {
   return { type: "text", text };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function toolErrorResponse(
+  tool: string,
+  content: ToolContent[],
+  card: Record<string, unknown>,
+) {
+  const error = toolErrorPreview(content) ?? "Tool failed without an error message.";
+  return {
+    content,
+    isError: true,
+    _meta: {
+      tool,
+      card: {
+        ...card,
+        status: "error",
+        error,
+        payload: { content },
+      },
+    },
+  };
 }
 
 function textSummary(content: ToolContent[]): {
@@ -749,16 +791,30 @@ export function createMcpServer(
     },
     async ({ path, alias, mode, baseRef }, { _meta }) => {
       const startedAt = performance.now();
+      let openedWorkspace;
+      try {
+        openedWorkspace = await workspaces.openWorkspace(
+          { path, alias, mode, baseRef },
+          { conversationScopeId: openAiConversationScopeId(_meta) },
+        );
+      } catch (error) {
+        const content = [textBlock(errorText(error))];
+        logFailedToolResponse(config, {
+          tool: "open_workspace",
+          path: alias ?? path,
+        }, content, startedAt);
+        return toolErrorResponse("open_workspace", content, {
+          path: alias ?? path,
+          mode: mode ?? "checkout",
+        });
+      }
       const {
         workspace,
         agentsFiles,
         availableAgentsFiles,
         workspaceReused,
         includeBootstrapContext,
-      } = await workspaces.openWorkspace(
-        { path, alias, mode, baseRef },
-        { conversationScopeId: openAiConversationScopeId(_meta) },
-      );
+      } = openedWorkspace;
       if (config.widgets === "changes") {
         await reviewCheckpoints.initializeWorkspace({
           workspaceId: workspace.id,
@@ -1229,12 +1285,22 @@ export function createMcpServer(
       },
       async ({ workspaceId }) => {
         const startedAt = performance.now();
-        const workspace = workspaces.getWorkspace(workspaceId);
-        const review = await reviewCheckpoints.reviewChanges({
-          workspaceId,
-          root: workspace.root,
-          markReviewed: true,
-        });
+        let review;
+        try {
+          const workspace = workspaces.getWorkspace(workspaceId);
+          review = await reviewCheckpoints.reviewChanges({
+            workspaceId,
+            root: workspace.root,
+            markReviewed: true,
+          });
+        } catch (error) {
+          const content = [textBlock(errorText(error))];
+          logFailedToolResponse(config, {
+            tool: "show_changes",
+            workspaceId,
+          }, content, startedAt);
+          return toolErrorResponse("show_changes", content, { workspaceId });
+        }
 
         const content = [textBlock(review.result)];
         logToolCall(config, {

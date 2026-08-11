@@ -27,6 +27,15 @@ export type ToolHeaderSummary =
   | { kind: "empty" };
 
 export function getToolDisplay(card: ToolResultCard): ToolDisplay {
+  if (card.status === "error") {
+    const display = getToolDisplay({ ...card, status: undefined });
+    return {
+      ...display,
+      title: failedToolTitle(card.tool),
+      state: "error",
+    };
+  }
+
   switch (card.tool) {
     case "open_workspace":
       return {
@@ -116,6 +125,31 @@ export function getToolDisplay(card: ToolResultCard): ToolDisplay {
         tone: "review",
       };
     }
+  }
+}
+
+function failedToolTitle(tool: ToolResultCard["tool"]): string {
+  switch (tool) {
+    case "open_workspace":
+      return "Workspace failed";
+    case "show_changes":
+      return "Review failed";
+    case "read":
+      return "Read failed";
+    case "write":
+      return "Write failed";
+    case "edit":
+    case "apply_patch":
+      return "Edit failed";
+    case "grep":
+    case "glob":
+      return "Search failed";
+    case "ls":
+      return "Directory failed";
+    case "bash":
+    case "exec_command":
+    case "write_stdin":
+      return "Command failed";
   }
 }
 

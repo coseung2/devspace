@@ -24,10 +24,13 @@ test("open_workspace keeps lifecycle flags out of model output and preserves com
   const tools = await context.client.listTools();
   const openTool = tools.tools.find((tool) => tool.name === "open_workspace");
   const outputProperties = (openTool?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  const openToolMeta = openTool?._meta as Record<string, unknown> | undefined;
   assert.equal(outputProperties && "workspaceReused" in outputProperties, false);
   assert.equal(outputProperties && "includeBootstrapContext" in outputProperties, false);
   assert.equal(outputProperties && "agentProviders" in outputProperties, false);
   assert.equal(outputProperties && "agents" in outputProperties, false);
+  assert.equal(openToolMeta?.["openai/toolInvocation/invoking"], "Opening workspace...");
+  assert.equal(openToolMeta?.["openai/toolInvocation/invoked"], "Workspace ready");
 
   const firstStructured = structuredContent(first);
   assert.equal(firstStructured.workspaceId, structuredContent(repeated).workspaceId);
@@ -186,6 +189,29 @@ test("open_workspace accepts configured aliases", async (t) => {
   const result = await client.callTool({ name: "open_workspace", arguments: { alias: "aura" } });
   assert.doesNotMatch(responseText(result), /Pass either path or alias/);
   assert.match(responseText(result), /Root:/);
+
+  const pathAliasResult = await client.callTool({
+    name: "open_workspace",
+    arguments: { path: "aura", mode: "checkout" },
+  });
+  assert.equal(pathAliasResult.isError, undefined);
+  assert.match(responseText(pathAliasResult), /Root:/);
+  assert.equal(structuredContent(pathAliasResult).root, context.project);
+});
+
+test("open_workspace failures return visible error card metadata", async (t) => {
+  const context = await fixture(t);
+  const result = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { alias: "missing-project" },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(responseText(result), /Unknown workspace alias: missing-project/);
+  const card = responseCard(result);
+  assert.equal(card.status, "error");
+  assert.equal(card.path, "missing-project");
+  assert.match(String(card.error), /Available aliases|Configure workspaceAliases first/);
 });
 
 test("checkout reuse and context suppression survive a registry restart", async (t) => {

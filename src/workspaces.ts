@@ -345,7 +345,8 @@ export class WorkspaceRegistry {
     if (!input.path?.trim()) {
       throw new Error("open_workspace requires either path or alias.");
     }
-    return input.path;
+    const requestedPath = input.path.trim();
+    return this.config.workspaceAliases[requestedPath] ?? input.path;
   }
 
   private async openWorktreeWorkspace(path: string, baseRef: string | undefined): Promise<WorkspaceContext> {

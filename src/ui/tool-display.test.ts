@@ -114,6 +114,20 @@ assert.equal(
   getToolDisplay({ tool: "exec_command", summary: { running: false, exitCode: 1 } }).state,
   "error",
 );
+assert.deepEqual(
+  getToolDisplay({
+    tool: "open_workspace",
+    status: "error",
+    error: "Unknown workspace alias.",
+  }),
+  {
+    icon: toolIcons.folderOpen,
+    title: "Workspace failed",
+    label: undefined,
+    tone: "workspace",
+    state: "error",
+  },
+);
 
 assert.deepEqual(
   pickDisplay(getToolDisplay({ tool: "glob", summary: { lines: 1, pattern: "**/*.ts" } })),
