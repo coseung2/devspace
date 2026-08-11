@@ -182,7 +182,7 @@ async function serve(): Promise<void> {
 
   const { createServer } = await import("./server.js");
   const config = loadConfig();
-  const { app, close, attachPreviewUpgrade } = createServer(config);
+  const { app, close } = createServer(config);
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
     console.log(`public base url: ${config.publicBaseUrl}`);
@@ -194,8 +194,6 @@ async function serve(): Promise<void> {
     console.log("auth: Owner password approval required");
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
   });
-  attachPreviewUpgrade(httpServer);
-
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
@@ -249,7 +247,7 @@ function runConfigCommand(args: string[]): void {
     throw new Error(`Unknown config command: ${subcommand}`);
   }
   const value = rest.join(" ").trim();
-  if (key === "publicBaseUrl" || key === "previewBaseUrl") {
+  if (key === "publicBaseUrl") {
     if (!value) throw new Error(`Missing ${key} value.`);
     writeDevspaceConfig({
       ...files.config,
@@ -265,7 +263,7 @@ function runConfigCommand(args: string[]): void {
       workspaceAliases: { ...files.config.workspaceAliases, [alias]: target },
     });
   } else {
-    throw new Error("Supported keys: publicBaseUrl, previewBaseUrl, workspaceAlias.");
+    throw new Error("Supported keys: publicBaseUrl, workspaceAlias.");
   }
   console.log(`Updated ${files.configPath}`);
 }
@@ -282,7 +280,6 @@ function printHelp(): void {
       "  devspace doctor          Show config, runtime, and native dependency status",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
-      "  devspace config set previewBaseUrl <url|null>",
       "  devspace config set workspaceAlias <alias> <path>",
       "  devspace -v, --version   Print the installed version",
       "",

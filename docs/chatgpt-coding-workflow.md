@@ -28,21 +28,6 @@ For a configured project catalog, use an alias instead of an absolute path:
 Aliases are resolved by DevSpace and remain subject to the configured allowed
 roots.
 
-To view a running Aura or Aura Board development server on another computer,
-call `open_preview` after opening the workspace:
-
-```json
-{
-  "workspaceId": "<workspaceId>",
-  "command": "npm run dev",
-  "port": 3000
-}
-```
-
-Open the returned URL in the browser. The preview process is kept alive as a
-workspace-owned process session, and the server is bound to `0.0.0.0` so the
-configured VM/Tailscale/reverse-proxy address can reach it.
-
 ChatGPT may support automatic checkout recovery through optional host
 conversation metadata. This is an OpenAI-host adapter detail, not a standard MCP
 conversation field. When that optional context is available, opening the same

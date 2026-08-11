@@ -35,7 +35,6 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
 | `DEVSPACE_WORKSPACE_ALIASES` | JSON object mapping short aliases such as `aura` to project paths. |
 | `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the server, without `/mcp`. |
-| `DEVSPACE_PREVIEW_BASE_URL` | Optional public origin used for browser preview URLs. Defaults to `DEVSPACE_PUBLIC_BASE_URL`. |
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
@@ -68,16 +67,7 @@ running these commands.
 
 `open_workspace` accepts either `path` or `alias`. Alias targets still have to
 be inside `DEVSPACE_ALLOWED_ROOTS`; the alias is only a convenience name, not a
-permission bypass. Preview URLs contain a random per-preview access token. The
-first browser request turns it into a scoped HttpOnly cookie so relative asset
-requests continue to work; treat the URL like a secret and keep the preview
-origin on a private network.
-
-For browser previews, set `DEVSPACE_PREVIEW_BASE_URL` to the URL by which other
-devices reach this host. Then call `open_preview` with the workspace ID, a dev
-command such as `npm run dev`, and its port. DevSpace binds the process to
-`0.0.0.0`, proxies the port under a private random preview path, and returns a
-URL such as `https://preview.example.com/preview/pv_.../`.
+permission bypass.
 
 ## Native Artifact Download
 

@@ -32,7 +32,6 @@ assert.equal(loadConfig({
   DEVSPACE_ALLOWED_ROOTS: aliasRoot,
   DEVSPACE_WORKSPACE_ALIASES: JSON.stringify({ aura: "~/projects/aura", "aura-board": "~/projects/aura-board" }),
 }).workspaceAliases.aura, join(process.env.USERPROFILE ?? process.env.HOME ?? "", "projects", "aura"));
-assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PREVIEW_BASE_URL: "https://preview.example.com/" }).previewBaseUrl, "https://preview.example.com");
 assert.equal(loadConfig(baseEnv).artifactMaxFileBytes, 100 * 1024 * 1024);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_ARTIFACTS: "1" }).artifactsEnabled, true);
 assert.equal(

@@ -99,46 +99,6 @@ to the DevSpace installation, not to this package's documentation.
 The coding host can then call `open_workspace` with `{ "alias": "aura" }` or
 `{ "alias": "aura-board" }` instead of needing to know the VM filesystem path.
 
-### View an Aura development server from another computer
-
-The MCP URL and the browser preview URL can be different. Configure the public
-origin that points to this DevSpace VM (for example a Tailscale hostname):
-
-```bash
-devspace config set previewBaseUrl https://devspace.example.com
-```
-
-After opening Aura or Aura Board by alias, call `open_preview` with a command
-and port, for example:
-
-```json
-{
-  "workspaceId": "<workspaceId>",
-  "command": "npm run dev",
-  "port": 3000
-}
-```
-
-Use the returned URL from a laptop or desktop that can reach the configured
-preview origin. The application must listen on the port supplied to
-`open_preview`; DevSpace supplies `HOST=0.0.0.0`, `VITE_HOST=0.0.0.0`, and
-`PORT=<port>` to the process. The preview route is random and is not an
-authentication boundary, so use a private VPN/tunnel and do not expose it on a
-public internet endpoint without an access control layer.
-
-If your tunnel URL changes for one run, override it without rewriting config:
-
-```bash
-DEVSPACE_PUBLIC_BASE_URL="https://new-tunnel.example.com" npx @waishnav/devspace serve
-```
-
-For a stable public URL, persist it:
-
-```bash
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
-npx @waishnav/devspace serve
-```
-
 ## Approve The Client
 
 When ChatGPT, Claude, or another MCP client connects, DevSpace shows an Owner

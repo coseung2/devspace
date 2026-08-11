@@ -19,7 +19,6 @@ export interface ServerConfig {
   workspaceAliases: Record<string, string>;
   allowedHosts: string[];
   publicBaseUrl: string;
-  previewBaseUrl?: string;
   toolMode: ToolMode;
   widgets: WidgetMode;
   stateDir: string;
@@ -250,7 +249,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const publicBaseUrl = parsePublicBaseUrl(
     env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
-  const configuredPreviewBaseUrl = env.DEVSPACE_PREVIEW_BASE_URL ?? files.config.previewBaseUrl ?? undefined;
   const allowedRoots = parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots);
   const workspaceAliases = parseWorkspaceAliases(env.DEVSPACE_WORKSPACE_ALIASES ?? files.config.workspaceAliases);
   assertWorkspaceAliasesAllowed(workspaceAliases, allowedRoots);
@@ -271,7 +269,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     workspaceAliases,
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
-    previewBaseUrl: configuredPreviewBaseUrl ? parsePublicBaseUrl(configuredPreviewBaseUrl) : undefined,
     toolMode: parseToolMode(env),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
     stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),

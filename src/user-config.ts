@@ -15,7 +15,6 @@ export interface DevspaceUserConfig {
   allowedRoots?: string[];
   workspaceAliases?: Record<string, string>;
   publicBaseUrl?: string | null;
-  previewBaseUrl?: string | null;
   allowedHosts?: string[];
   stateDir?: string;
   worktreeRoot?: string;

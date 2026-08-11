@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import type { IncomingMessage, Server as HttpServer, ServerResponse } from "node:http";
-import type { Socket } from "node:net";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -45,7 +43,6 @@ import {
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
-import { PreviewSessionManager } from "./preview-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
@@ -77,7 +74,6 @@ const SHELL_TOOL_ANNOTATIONS = {
 interface RunningServer {
   app: ReturnType<typeof createMcpExpressApp>;
   config: ServerConfig;
-  attachPreviewUpgrade(httpServer: HttpServer): void;
   close(): Promise<void>;
 }
 
@@ -186,7 +182,7 @@ function serverInstructions(config: ServerConfig): string {
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use open_preview for an Aura or Aura Board development server when the user needs to view it from another device. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -199,7 +195,7 @@ function serverInstructions(config: ServerConfig): string {
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use open_preview for an Aura or Aura Board development server when the user needs to view it from another device. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
@@ -472,15 +468,6 @@ function processOutputSchema(): z.ZodRawShape {
   });
 }
 
-function previewOutputSchema(): z.ZodRawShape {
-  return resultOutputSchema({
-    previewId: z.string(),
-    url: z.string(),
-    port: z.number().int().positive(),
-    processSessionId: z.number().int().positive(),
-  });
-}
-
 function processToolResponse(
   tool: "exec_command" | "write_stdin",
   workspaceId: string,
@@ -662,7 +649,6 @@ export function createMcpServer(
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
-  previewSessions = new PreviewSessionManager(processSessions),
 ): McpServer {
   const server = new McpServer(
     {
@@ -1149,76 +1135,6 @@ export function createMcpServer(
   );
   }
 
-  registerAppTool(
-    server,
-    "open_preview",
-    {
-      title: "Open development preview",
-      description:
-        "Start a long-running Aura or Aura Board development server and expose it through a browser-accessible URL. The command must start the app server; DevSpace sets HOST=0.0.0.0 and PORT for it. Use the returned URL from a laptop or desktop that can reach this DevSpace host.",
-      inputSchema: {
-        workspaceId: z.string().describe("Workspace to use. Reuse the current project's workspaceId."),
-        command: z.string().min(1).describe("Development server command, for example npm run dev."),
-        port: z.number().int().min(1).max(65535).describe("Port the development server should listen on."),
-        workingDirectory: z.string().optional().describe("Optional workspace-relative directory."),
-      },
-      outputSchema: previewOutputSchema(),
-      ...toolWidgetDescriptorMeta(config, "shell"),
-      annotations: SHELL_TOOL_ANNOTATIONS,
-    },
-    async ({ workspaceId, command, port, workingDirectory }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
-      const preview = await previewSessions.open({
-        workspaceId,
-        command,
-        cwd,
-        port,
-        workspaceRoot: workspace.root,
-      });
-      const url = `${config.previewBaseUrl ?? config.publicBaseUrl}${preview.urlPath}?token=${encodeURIComponent(preview.accessToken)}`;
-      const result = [
-        `Development preview started for workspace ${workspaceId}.`,
-        `URL: ${url}`,
-        `The server is listening on port ${port} and is reachable from devices that can reach this DevSpace host.`,
-        `Stop it by terminating process session ${preview.processSessionId}.`,
-      ].join("\n");
-      return {
-        content: [textBlock(result)],
-        structuredContent: {
-          result,
-          previewId: preview.id,
-          url,
-          port,
-          processSessionId: preview.processSessionId,
-        },
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
-    "close_preview",
-    {
-      title: "Close development preview",
-      description: "Stop a development preview previously started by open_preview.",
-      inputSchema: {
-        previewId: z.string().describe("Preview identifier returned by open_preview."),
-      },
-      outputSchema: resultOutputSchema({ previewId: z.string() }),
-      ...toolWidgetDescriptorMeta(config, "shell"),
-      annotations: SHELL_TOOL_ANNOTATIONS,
-    },
-    async ({ previewId }) => {
-      const preview = previewSessions.close(previewId);
-      const result = `Development preview ${preview.id} stopped.`;
-      return {
-        content: [textBlock(result)],
-        structuredContent: { result, previewId: preview.id },
-      };
-    },
-  );
-
   if (config.toolMode === "codex") {
     registerAppTool(
       server,
@@ -1696,7 +1612,6 @@ export function createServer(
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
-  const previewSessions = new PreviewSessionManager(processSessions);
   const activeMcpRequests = new Set<() => Promise<void>>();
 
   if (config.logging.trustProxy) {
@@ -1754,18 +1669,6 @@ export function createServer(
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true, name: "devspace" });
-  });
-
-  app.all("/preview/:previewId/{*suffix}", (req, res) => {
-    const preview = previewSessions.get(req.params.previewId);
-    if (!preview) {
-      res.status(404).json({ error: "Unknown preview session." });
-      return;
-    }
-    const suffix = Array.isArray(req.params.suffix)
-      ? req.params.suffix.join("/")
-      : req.params.suffix ?? "";
-    previewSessions.proxy(req, res, preview, suffix);
   });
 
   app.all("/mcp", async (req, res) => {
@@ -1832,7 +1735,6 @@ export function createServer(
         reviewCheckpoints,
         processSessions,
         incomingArtifactAdapters,
-        previewSessions,
       );
       activeMcpRequests.add(closeRequestServer);
       await mcpServer.connect(transport);
@@ -1855,15 +1757,9 @@ export function createServer(
   return {
     app,
     config,
-    attachPreviewUpgrade: (httpServer) => {
-      httpServer.on("upgrade", (request: IncomingMessage, socket: Socket, head: Buffer) => {
-        previewSessions.upgrade(request, socket, head);
-      });
-    },
     close: () => {
       closePromise ??= (async () => {
         await Promise.all(Array.from(activeMcpRequests, (closeRequest) => closeRequest()));
-        previewSessions.closeAll();
         processSessions.shutdown();
         oauthProvider.close();
         workspaceStore.close?.();
@@ -1882,7 +1778,7 @@ async function isMainModule(): Promise<boolean> {
 }
 
 if (await isMainModule()) {
-  const { app, config, close, attachPreviewUpgrade } = createServer();
+  const { app, config, close } = createServer();
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(
       `devspace listening on http://${config.host}:${config.port}/mcp`,
@@ -1900,8 +1796,6 @@ if (await isMainModule()) {
         : `unsupported on ${process.platform}`;
     console.log(`native artifact download: ${artifactDownloadStatus}`);
   });
-  attachPreviewUpgrade(httpServer);
-
   let shuttingDown = false;
   const shutdown = async () => {
     if (shuttingDown) return;
