@@ -11,6 +11,41 @@ import { createServer } from "./server.js";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 
+test("trusted proxy mode accepts only loopback proxy hops", async () => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-trust-proxy-test-"));
+  const config = loadConfig({
+    DEVSPACE_ALLOWED_ROOTS: root,
+    DEVSPACE_AGENT_DIR: join(root, "agent"),
+    DEVSPACE_CONFIG_DIR: join(root, "config"),
+    DEVSPACE_OAUTH_OWNER_TOKEN: randomBytes(32).toString("base64url"),
+    DEVSPACE_PUBLIC_BASE_URL: "http://127.0.0.1",
+    DEVSPACE_STATE_DIR: join(root, "state"),
+    DEVSPACE_TRUST_PROXY: "1",
+    DEVSPACE_WIDGETS: "off",
+    DEVSPACE_WORKTREE_ROOT: join(root, "worktrees"),
+    HOST: "127.0.0.1",
+    PORT: "1",
+    DEVSPACE_LOG_LEVEL: "silent",
+    DEVSPACE_LOG_REQUESTS: "false",
+    DEVSPACE_LOG_TOOL_CALLS: "false",
+  });
+  const running = createServer(config);
+
+  try {
+    assert.equal(running.app.get("trust proxy"), "loopback");
+    const trustProxy = running.app.get("trust proxy fn") as
+      | ((address: string, hop: number) => boolean)
+      | undefined;
+    assert.ok(trustProxy);
+    assert.equal(trustProxy("127.0.0.1", 0), true);
+    assert.equal(trustProxy("::1", 0), true);
+    assert.equal(trustProxy("203.0.113.10", 0), false);
+  } finally {
+    await running.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("stateless authenticated HTTP requests share workspaces without session state", async () => {
   const root = await mkdtemp(join(tmpdir(), "devspace-stateless-http-test-"));
   const project = join(root, "project");

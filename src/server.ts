@@ -1615,7 +1615,7 @@ export function createServer(
   const activeMcpRequests = new Set<() => Promise<void>>();
 
   if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
+    app.set("trust proxy", "loopback");
   }
 
   app.use((req, res, next) => {

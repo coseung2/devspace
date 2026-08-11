@@ -191,6 +191,12 @@ npx @waishnav/devspace serve
 
 Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
+Set `DEVSPACE_TRUST_PROXY=1` when DevSpace is reached through a reverse proxy
+running on the same machine, such as Tailscale Funnel forwarding to the default
+loopback listener. DevSpace trusts forwarded client addresses only from
+loopback proxy hops; direct non-loopback clients cannot supply trusted proxy
+headers.
+
 Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command
 previews in logs.
 
