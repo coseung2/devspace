@@ -197,6 +197,15 @@ test("open_workspace accepts configured aliases", async (t) => {
   assert.equal(pathAliasResult.isError, undefined);
   assert.match(responseText(pathAliasResult), /Root:/);
   assert.equal(structuredContent(pathAliasResult).root, context.project);
+
+  for (const path of ["~/aura", "/workspace/aura", String.raw`C:\workspace\aura`]) {
+    const trailingAliasResult = await client.callTool({
+      name: "open_workspace",
+      arguments: { path, mode: "checkout" },
+    });
+    assert.equal(trailingAliasResult.isError, undefined, path);
+    assert.equal(structuredContent(trailingAliasResult).root, context.project, path);
+  }
 });
 
 test("open_workspace failures return visible error card metadata", async (t) => {
