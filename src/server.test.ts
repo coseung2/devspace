@@ -102,6 +102,22 @@ test("workspace reuse is the normal model path", async (t) => {
   }
 });
 
+test("changes mode keeps workspace execution independent from UI resources", async (t) => {
+  const context = await fixture(t, { widgets: "changes" });
+  const tools = await context.client.listTools();
+  const openTool = tools.tools.find((tool) => tool.name === "open_workspace");
+  const showChangesTool = tools.tools.find((tool) => tool.name === "show_changes");
+  const openMeta = openTool?._meta as Record<string, unknown> | undefined;
+  const showChangesMeta = showChangesTool?._meta as Record<string, unknown> | undefined;
+
+  assert.equal(openMeta?.ui, undefined);
+  assert.equal(openMeta?.["openai/toolInvocation/invoking"], "Opening workspace...");
+  assert.deepEqual(showChangesMeta?.ui, {
+    resourceUri: "ui://devspace/workspace-app.html",
+    visibility: ["model"],
+  });
+});
+
 test("concurrent checkout opens return one full context and one reuse instruction", async (t) => {
   const context = await fixture(t);
   const [first, second] = await Promise.all([
@@ -273,7 +289,10 @@ interface ServerFixture {
   close: () => Promise<void>;
 }
 
-async function fixture(t: TestContext, options: { git?: boolean } = {}): Promise<ServerFixture> {
+async function fixture(
+  t: TestContext,
+  options: { git?: boolean; widgets?: "off" | "changes" | "full" } = {},
+): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
   const project = join(root, "project");
   const agentDir = join(root, "agent");
@@ -308,7 +327,7 @@ async function fixture(t: TestContext, options: { git?: boolean } = {}): Promise
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
-    DEVSPACE_WIDGETS: "full",
+    DEVSPACE_WIDGETS: options.widgets ?? "full",
     DEVSPACE_TOOL_MODE: "full",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     PORT: "1",

@@ -105,7 +105,7 @@ type ToolWidgetKind =
   | "show_changes";
 
 interface ToolDefinitionMeta extends Record<string, unknown> {
-  ui: {
+  ui?: {
     resourceUri: string;
     visibility: ["model"];
   };
@@ -113,12 +113,8 @@ interface ToolDefinitionMeta extends Record<string, unknown> {
   "openai/toolInvocation/invoked": string;
 }
 
-type EmptyToolDefinitionMeta = Record<string, unknown> & {
-  "ui/resourceUri"?: string;
-};
-
 interface ToolWidgetDescriptorMeta {
-  _meta: ToolDefinitionMeta | EmptyToolDefinitionMeta;
+  _meta: ToolDefinitionMeta;
 }
 
 const toolWidgetStatus: Record<ToolWidgetKind, { invoking: string; invoked: string }> = {
@@ -137,7 +133,7 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
     case "off":
       return false;
     case "changes":
-      return kind === "workspace" || kind === "show_changes";
+      return kind === "show_changes";
     case "full":
       return true;
   }
@@ -147,18 +143,21 @@ function toolWidgetDescriptorMeta(
   config: ServerConfig,
   kind: ToolWidgetKind,
 ): ToolWidgetDescriptorMeta {
-  if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
-
   const status = toolWidgetStatus[kind];
+  const _meta: ToolDefinitionMeta = {
+    "openai/toolInvocation/invoking": status.invoking,
+    "openai/toolInvocation/invoked": status.invoked,
+  };
+
+  if (!shouldAttachWidget(config.widgets, kind)) return { _meta };
 
   return {
     _meta: {
+      ..._meta,
       ui: {
         resourceUri: WORKSPACE_APP_URI,
         visibility: ["model"],
       },
-      "openai/toolInvocation/invoking": status.invoking,
-      "openai/toolInvocation/invoked": status.invoked,
     },
   };
 }
