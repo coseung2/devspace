@@ -125,6 +125,15 @@ test("workspace paths outside the allowed roots are rejected", async (t) => {
   );
 });
 
+test("unknown workspace ids explain how to recover", async (t) => {
+  const context = await fixture(t);
+
+  assert.throws(
+    () => context.registry.getWorkspace("ws_missing"),
+    /Open the target project or worktree again and continue with the new workspaceId/,
+  );
+});
+
 test("a symlinked allowed root preserves checkout and worktree path behavior", { skip: platform() === "win32" }, async (t) => {
   const context = await fixture(t);
   const aliasRoot = join(context.root, "alias-root");

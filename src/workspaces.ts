@@ -248,7 +248,9 @@ export class WorkspaceRegistry {
 
     const session = this.store?.getSession(workspaceId);
     if (!session) {
-      throw new Error(`Unknown workspaceId: ${workspaceId}. Call open_workspace first.`);
+      throw new Error(
+        `Unknown workspaceId: ${workspaceId}. Open the target project or worktree again and continue with the new workspaceId.`,
+      );
     }
 
     const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
