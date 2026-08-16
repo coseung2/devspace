@@ -25,6 +25,8 @@ const MAX_PATH_HINTS = 50;
 const MAX_TRIGGER_VALUES = 64;
 const MAX_ALWAYS_ENTRIES = 2;
 
+const scopeWriteTails = new Map<string, Promise<void>>();
+
 export type TaskContextKind = "rule" | "decision" | "knowledge" | "procedure" | "note";
 export type TaskContextScope = "global" | "project";
 
@@ -169,24 +171,22 @@ export async function prepareTaskContext(
     for (const entry of loaded.entries) entriesById.set(entry.id, entry);
   }
 
-  let alwaysEntries = 0;
   const taskText = normalizeText(input.task);
   const rawTask = input.task;
   const pathHints = normalizePathHints(input.paths, diagnostics);
-  const candidates = [...entriesById.values()]
-    .filter((entry) => {
-      if (entry.when.always) {
-        alwaysEntries += 1;
-        if (alwaysEntries > MAX_ALWAYS_ENTRIES) {
-          diagnostics.push(
-            `An additional always task-context entry was ignored because at most ${MAX_ALWAYS_ENTRIES} are allowed.`,
-          );
-          return false;
-        }
-      }
-      return entryMatches(entry, taskText, rawTask, pathHints, diagnostics);
-    })
+  const matchingEntries = [...entriesById.values()]
+    .filter((entry) => entryMatches(entry, taskText, rawTask, pathHints, diagnostics))
     .sort(compareEntries);
+  let alwaysEntries = 0;
+  const candidates = matchingEntries.filter((entry) => {
+    if (!entry.when.always) return true;
+    alwaysEntries += 1;
+    if (alwaysEntries <= MAX_ALWAYS_ENTRIES) return true;
+    diagnostics.push(
+      `An additional always task-context entry was ignored because at most ${MAX_ALWAYS_ENTRIES} are allowed.`,
+    );
+    return false;
+  });
 
   const matchedEntries: TaskContextMatchedEntry[] = [];
   const contextSections: string[] = [];
@@ -264,48 +264,72 @@ export async function setTaskContextEntry(
     );
   }
 
-  const resolved = await ensureWritableScope(location, config.stateDir);
-  const rawIndex = await loadWritableIndex(resolved.indexPath);
-  const entryPath = `entries/${id}.md`;
-  const nextEntry = {
-    id,
-    title,
-    kind,
-    path: entryPath,
-    priority,
-    when: serializeWhen(when),
-  };
-  const nextEntries = rawIndex.entries.filter(
-    (candidate) => !isRecord(candidate) || candidate.id !== id,
-  );
-  nextEntries.push(nextEntry);
+  return withScopeWriteLock(location.root, async () => {
+    const resolved = await ensureWritableScope(location, config.stateDir);
+    const rawIndex = await loadWritableIndex(resolved.indexPath);
+    const previousEntry = rawIndex.entries.find(
+      (candidate) => isRecord(candidate) && candidate.id === id,
+    );
+    const previousPath = isRecord(previousEntry)
+      ? optionalBoundedString(previousEntry.path, 512)
+      : undefined;
+    const contentDigest = createHash("sha256").update(content).digest("hex").slice(0, 16);
+    const entryPath = `entries/${id}.${contentDigest}.md`;
+    const nextEntry = {
+      id,
+      title,
+      kind,
+      path: entryPath,
+      priority,
+      when: serializeWhen(when),
+    };
+    const nextEntries = rawIndex.entries.filter(
+      (candidate) => !isRecord(candidate) || candidate.id !== id,
+    );
+    nextEntries.push(nextEntry);
+    if (nextEntries.length > MAX_INDEX_ENTRIES) {
+      throw new Error(`A task-context index may contain at most ${MAX_INDEX_ENTRIES} entries.`);
+    }
 
-  const alwaysEntries = nextEntries.filter(
-    (candidate) => isRecord(candidate) && isRecord(candidate.when) && candidate.when.always === true,
-  ).length;
-  if (alwaysEntries > MAX_ALWAYS_ENTRIES) {
-    throw new Error(`At most ${MAX_ALWAYS_ENTRIES} always task-context entries are allowed per scope.`);
-  }
+    const alwaysEntries = nextEntries.filter(
+      (candidate) => isRecord(candidate) && isRecord(candidate.when) && candidate.when.always === true,
+    ).length;
+    if (alwaysEntries > MAX_ALWAYS_ENTRIES) {
+      throw new Error(`At most ${MAX_ALWAYS_ENTRIES} always task-context entries are allowed per scope.`);
+    }
 
-  const entryAbsolutePath = resolve(resolved.scopeRoot, entryPath);
-  if (!isPathInsideRoot(entryAbsolutePath, resolved.scopeRoot)) {
-    throw new Error("Task-context entry path escaped its scope.");
-  }
+    const entryAbsolutePath = resolve(resolved.scopeRoot, entryPath);
+    if (!isPathInsideRoot(entryAbsolutePath, resolved.scopeRoot)) {
+      throw new Error("Task-context entry path escaped its scope.");
+    }
 
-  await writeAtomic(entryAbsolutePath, `${content}\n`);
-  await writeAtomic(
-    resolved.indexPath,
-    `${JSON.stringify({ version: 1, entries: nextEntries }, null, 2)}\n`,
-  );
+    await writeAtomic(entryAbsolutePath, `${content}\n`);
+    try {
+      await writeAtomic(
+        resolved.indexPath,
+        `${JSON.stringify({ version: 1, entries: nextEntries }, null, 2)}\n`,
+      );
+    } catch (error) {
+      if (previousPath !== entryPath) await rm(entryAbsolutePath, { force: true });
+      throw error;
+    }
 
-  return {
-    projectKey,
-    scope,
-    id,
-    title,
-    kind,
-    source: `${location.label}/${entryPath}`,
-  };
+    if (previousPath && previousPath !== entryPath && isSafeRelativePath(previousPath)) {
+      const previousAbsolutePath = resolve(resolved.scopeRoot, previousPath);
+      if (isPathInsideRoot(previousAbsolutePath, resolved.scopeRoot)) {
+        await rm(previousAbsolutePath, { force: true }).catch(() => undefined);
+      }
+    }
+
+    return {
+      projectKey,
+      scope,
+      id,
+      title,
+      kind,
+      source: `${location.label}/${entryPath}`,
+    };
+  });
 }
 
 export async function taskContextProjectKey(
@@ -534,8 +558,8 @@ function entryMatches(
   for (const pattern of when.patterns) {
     try {
       if (new RegExp(pattern, "i").test(rawTask)) return true;
-    } catch (error) {
-      diagnostics.push(`${entry.scopeLabel} task-context index contains an invalid pattern: ${errorMessage(error)}`);
+    } catch {
+      diagnostics.push(`${entry.scopeLabel} task-context index contains an invalid pattern.`);
     }
   }
 
@@ -543,8 +567,8 @@ function entryMatches(
     try {
       const matcher = globToRegExp(normalizeRelativePath(pattern));
       if (paths.some((path) => matcher.test(path))) return true;
-    } catch (error) {
-      diagnostics.push(`${entry.scopeLabel} task-context index contains an invalid path pattern: ${errorMessage(error)}`);
+    } catch {
+      diagnostics.push(`${entry.scopeLabel} task-context index contains an invalid path pattern.`);
     }
   }
 
@@ -687,6 +711,28 @@ async function loadWritableIndex(indexPath: string): Promise<RawHarnessIndex> {
   return { version: 1, entries: parsed.entries };
 }
 
+async function withScopeWriteLock<T>(
+  scopeRoot: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = resolve(scopeRoot);
+  const previous = scopeWriteTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolveCurrent) => {
+    release = resolveCurrent;
+  });
+  const tail = previous.catch(() => undefined).then(() => current);
+  scopeWriteTails.set(key, tail);
+
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (scopeWriteTails.get(key) === tail) scopeWriteTails.delete(key);
+  }
+}
+
 async function writeAtomic(path: string, content: string): Promise<void> {
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -708,10 +754,16 @@ function normalizePathHints(paths: string[] | undefined, diagnostics: string[]):
   if (paths.length > MAX_PATH_HINTS) {
     diagnostics.push(`Only the first ${MAX_PATH_HINTS} path hints were considered.`);
   }
-  return paths
-    .slice(0, MAX_PATH_HINTS)
-    .map((path) => normalizeRelativePath(path))
-    .filter(Boolean);
+  const normalized: string[] = [];
+  for (const path of paths.slice(0, MAX_PATH_HINTS)) {
+    const candidate = normalizeRelativePath(path);
+    if (!isSafeRelativePath(candidate)) {
+      diagnostics.push("An unsafe task-context path hint was ignored.");
+      continue;
+    }
+    normalized.push(candidate);
+  }
+  return normalized;
 }
 
 function normalizeText(value: string): string {

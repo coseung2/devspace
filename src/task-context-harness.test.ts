@@ -100,9 +100,15 @@ test("uses the source checkout identity for worktrees and matches positive path 
     task: "Update this helper.",
     paths: ["scripts/build-store-package.ps1"],
   });
+  const unsafe = await prepareTaskContext(fixture.config, fixture.workspace, {
+    task: "Update this helper.",
+    paths: ["../scripts/build-store-package.ps1"],
+  });
 
   assert.equal(prepared.matchedEntries.length, 1);
   assert.match(prepared.context, /package verifier/);
+  assert.equal(unsafe.matchedEntries.length, 0);
+  assert.ok(unsafe.diagnostics.some((diagnostic) => diagnostic.includes("unsafe")));
 });
 
 test("fails open on malformed indexes without leaking unrelated entries", async (t) => {
@@ -161,7 +167,7 @@ test("diagnostics do not expose identifiers or content from unmatched entries", 
         title: "Unmatched private concept",
         kind: "note",
         path: "entries/unmatched.md",
-        when: { patterns: ["["] },
+        when: { patterns: ["UNMATCHED_PRIVATE_PATTERN["] },
       },
     ],
   }, {
@@ -177,6 +183,7 @@ test("diagnostics do not expose identifiers or content from unmatched entries", 
   assert.doesNotMatch(diagnostics, /unmatched-private-concept/);
   assert.doesNotMatch(diagnostics, /Unmatched private concept/);
   assert.doesNotMatch(diagnostics, /This content must not enter/);
+  assert.doesNotMatch(diagnostics, /UNMATCHED_PRIVATE_PATTERN/);
   assert.match(diagnostics, /invalid pattern/);
 });
 
@@ -198,7 +205,10 @@ test("persists an explicitly supplied entry and retrieves it selectively", async
   });
 
   assert.equal(stored.projectKey, "media-project");
-  assert.equal(stored.source, "project:media-project/entries/regression-evidence.md");
+  assert.match(
+    stored.source,
+    /^project:media-project\/entries\/regression-evidence\.[a-f0-9]{16}\.md$/,
+  );
 
   const selected = await prepareTaskContext(fixture.config, fixture.workspace, {
     task: "Fix the regression and verify it.",
@@ -215,6 +225,77 @@ test("persists an explicitly supplied entry and retrieves it selectively", async
     await readFile(join(scopeRoot(fixture, "project"), "index.json"), "utf8"),
   ) as { entries: Array<{ id: string }> };
   assert.deepEqual(index.entries.map((entry) => entry.id), ["regression-evidence"]);
+});
+
+test("serializes concurrent writes without dropping index entries", async (t) => {
+  const fixture = await createFixture(t);
+  const entryCount = 32;
+
+  await Promise.all(
+    Array.from({ length: entryCount }, (_, index) => setTaskContextEntry(
+      fixture.config,
+      fixture.workspace,
+      {
+        entry: {
+          id: `concurrent-${index}`,
+          title: `Concurrent ${index}`,
+          kind: "note",
+          when: { keywords: [`trigger-${index}`] },
+          content: `Concurrent content ${index}.`,
+        },
+      },
+    )),
+  );
+
+  const index = JSON.parse(
+    await readFile(join(scopeRoot(fixture, "project"), "index.json"), "utf8"),
+  ) as { entries: Array<{ id: string }> };
+  assert.equal(index.entries.length, entryCount);
+  assert.deepEqual(
+    index.entries.map((entry) => entry.id).sort(),
+    Array.from({ length: entryCount }, (_, entryIndex) => `concurrent-${entryIndex}`).sort(),
+  );
+});
+
+test("publishes replacement content by swapping the index last", async (t) => {
+  const fixture = await createFixture(t);
+  const first = await setTaskContextEntry(fixture.config, fixture.workspace, {
+    entry: {
+      id: "replace-me",
+      title: "Replace me",
+      kind: "decision",
+      when: { keywords: ["replace"] },
+      content: "First content.",
+    },
+  });
+  const second = await setTaskContextEntry(fixture.config, fixture.workspace, {
+    entry: {
+      id: "replace-me",
+      title: "Replace me",
+      kind: "decision",
+      when: { keywords: ["replace"] },
+      content: "Second content.",
+    },
+  });
+
+  assert.notEqual(first.source, second.source);
+  const projectPrefix = "project:media-project/";
+  const firstPath = join(scopeRoot(fixture, "project"), first.source.slice(projectPrefix.length));
+  const secondPath = join(scopeRoot(fixture, "project"), second.source.slice(projectPrefix.length));
+  await assert.rejects(readFile(firstPath, "utf8"), /ENOENT/);
+  assert.equal(await readFile(secondPath, "utf8"), "Second content.\n");
+
+  const index = JSON.parse(
+    await readFile(join(scopeRoot(fixture, "project"), "index.json"), "utf8"),
+  ) as { entries: Array<{ id: string; path: string }> };
+  assert.deepEqual(index.entries, [{
+    id: "replace-me",
+    title: "Replace me",
+    kind: "decision",
+    path: second.source.slice(projectPrefix.length),
+    priority: 0,
+    when: { keywords: ["replace"] },
+  }]);
 });
 
 test("requires a positive trigger before persisting an entry", async (t) => {

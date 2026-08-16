@@ -77,7 +77,7 @@ The reader is intentionally bounded:
 
 Malformed indexes, missing source files, invalid patterns, and entries that resolve outside their scope produce diagnostics and are skipped. Preparation is fail-open: harness failures do not block normal workspace work.
 
-The harness root and scope directories are checked after symlink resolution. Entry paths must remain within their scope. Files written through `set_task_context_entry` use owner-only permissions and atomic replacement where the platform supports it.
+The harness root and scope directories are checked after symlink resolution. Entry paths must remain within their scope. Writes are serialized per scope. `set_task_context_entry` writes content to a versioned body file and publishes it by replacing the index last, so a failed index update does not partially replace an active entry. Written files use owner-only permissions and atomic replacement where the platform supports it.
 
 ## Operational guidance
 
