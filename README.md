@@ -139,6 +139,7 @@ DevSpace gives ChatGPT tools to:
 - use isolated Git worktrees for parallel coding sessions
 - follow project instructions from `AGENTS.md` and `CLAUDE.md`
 - discover local agent skills from your skill folders
+- select task-specific VM-local context from a central harness without exposing unmatched entries
 - show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
 
 ## Mental Model
@@ -181,6 +182,7 @@ devspace doctor
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
 - [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
 - [Native File Download](https://github.com/Waishnav/devspace/blob/main/docs/artifact-exchange.md)
+- [Task-context Harness](https://github.com/Waishnav/devspace/blob/main/docs/task-context-harness.md)
 - [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
 - [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)
 
