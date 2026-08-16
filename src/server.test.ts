@@ -86,6 +86,7 @@ test("workspace reuse is the normal model path", async (t) => {
   assert.ok(instructions);
   assert.match(instructions, /During continued work in the same project or worktree, do not call open_workspace again/);
   assert.match(instructions, /when the current workspaceId is rejected/);
+  assert.match(instructions, /call prepare_task_context once before reading or changing project files/);
 
   const tools = await context.client.listTools();
   const openTool = tools.tools.find((tool) => tool.name === "open_workspace");
@@ -100,6 +101,62 @@ test("workspace reuse is the normal model path", async (t) => {
     assert.doesNotMatch(modelContract, /Call open_workspace first/);
     assert.doesNotMatch(modelContract, /Workspace identifier returned by open_workspace/);
   }
+});
+
+test("task-context tools persist centrally and return only matching entries", async (t) => {
+  const context = await fixture(t);
+  const opened = await callOpen(context.client, context.project, "chat-1");
+  const workspaceId = String(structuredContent(opened).workspaceId);
+  const tools = await context.client.listTools();
+  assert.ok(tools.tools.some((tool) => tool.name === "prepare_task_context"));
+  assert.ok(tools.tools.some((tool) => tool.name === "set_task_context_entry"));
+
+  await context.client.callTool({
+    name: "set_task_context_entry",
+    arguments: {
+      workspaceId,
+      scope: "project",
+      entry: {
+        id: "release-evidence",
+        title: "Release evidence",
+        kind: "rule",
+        priority: 50,
+        when: { keywords: ["release", "package"] },
+        content: "Use the deterministic package output as release evidence.",
+      },
+    },
+  });
+  await context.client.callTool({
+    name: "set_task_context_entry",
+    arguments: {
+      workspaceId,
+      scope: "project",
+      entry: {
+        id: "subtitle-work",
+        title: "Subtitle work",
+        kind: "knowledge",
+        when: { keywords: ["subtitle"] },
+        content: "This unrelated entry must not be selected.",
+      },
+    },
+  });
+
+  const prepared = await context.client.callTool({
+    name: "prepare_task_context",
+    arguments: {
+      workspaceId,
+      task: "Build and verify the release package.",
+      paths: ["scripts/build-package.ts"],
+    },
+  });
+  const preparedStructured = structuredContent(prepared);
+  const matchedEntries = preparedStructured.matchedEntries as Array<{ id: string }>;
+
+  assert.deepEqual(matchedEntries.map((entry) => entry.id), ["release-evidence"]);
+  assert.match(responseText(prepared), /deterministic package output/);
+  assert.doesNotMatch(responseText(prepared), /Subtitle work/);
+  assert.doesNotMatch(responseText(prepared), /unrelated entry/);
+  assert.equal(preparedStructured.truncated, false);
 });
 
 test("changes mode keeps workspace execution independent from UI resources", async (t) => {
@@ -324,6 +381,7 @@ async function fixture(
 
   const config = loadConfig({
     DEVSPACE_CONFIG_DIR: join(root, ".config"),
+    DEVSPACE_STATE_DIR: stateDir,
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
