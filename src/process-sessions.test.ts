@@ -33,6 +33,12 @@ const manager = new ProcessSessionManager({
   completedSessionTtlMs: 1_000,
 });
 
+const boundedManager = new ProcessSessionManager({
+  defaultMaxOutputTokens: 20,
+  maxOutputTokens: 40,
+  completedSessionTtlMs: 1_000,
+});
+
 const node = process.platform === "win32"
   ? `"${process.execPath}"`
   : JSON.stringify(process.execPath);
@@ -178,6 +184,16 @@ if (!buffered.outputTruncated && buffered.sessionId) {
 assert.equal(buffered.outputTruncated, true);
 if (buffered.sessionId) manager.terminate("workspace-a", buffered.sessionId);
 
+const bounded = await boundedManager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "console.log('y'.repeat(1000))"`,
+  yieldTimeMs: 2_000,
+  maxOutputTokens: 1_000,
+});
+assert.equal(bounded.outputTruncated, true);
+assert.ok(bounded.output.length <= 300);
+
 try {
   if (process.platform === "win32") {
     const pty = await manager.start({
@@ -214,4 +230,5 @@ try {
   }
 } finally {
   manager.shutdown();
+  boundedManager.shutdown();
 }

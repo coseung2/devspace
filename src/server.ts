@@ -200,9 +200,13 @@ function serverInstructions(config: ServerConfig): string {
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
       : "";
+  const processOutputInstruction =
+    config.outputProfile === "web"
+      ? " Keep terminal output bounded with targeted commands such as rg, head, and tail; process responses use a 3,000-token default and a 12,000-token maximum."
+      : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${TASK_CONTEXT_SERVER_INSTRUCTION}${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${TASK_CONTEXT_SERVER_INSTRUCTION}${processOutputInstruction}${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -514,6 +518,7 @@ function processOutputSchema(): z.ZodRawShape {
 }
 
 function processToolResponse(
+  config: ServerConfig,
   tool: "exec_command" | "write_stdin",
   workspaceId: string,
   snapshot: ProcessSnapshot,
@@ -522,16 +527,20 @@ function processToolResponse(
   const result = processResult(snapshot);
   const content = [textBlock(result)];
   const outputSummary = textSummary(snapshot.output ? [textBlock(snapshot.output)] : []);
+  const metadata: {
+    tool: "exec_command" | "write_stdin";
+    card?: Record<string, unknown>;
+  } = { tool };
+  if (shouldAttachWidget(config.widgets, "shell")) {
+    metadata.card = {
+      workspaceId,
+      summary: { ...summary, ...outputSummary },
+      payload: { content },
+    };
+  }
   return {
     content,
-    _meta: {
-      tool,
-      card: {
-        workspaceId,
-        summary: { ...summary, ...outputSummary },
-        payload: { content },
-      },
-    },
+    _meta: metadata,
     structuredContent: {
       result,
       sessionId: snapshot.sessionId,
@@ -581,9 +590,9 @@ function registerCodexProcessTools(
           .number()
           .int()
           .positive()
-          .max(100_000)
+          .max(config.processOutputMaxTokens)
           .optional()
-          .describe("Approximate output token budget. Defaults to 10000."),
+          .describe(`Approximate output token budget. Defaults to ${config.processOutputDefaultTokens}; maximum ${config.processOutputMaxTokens}.`),
       },
       outputSchema: processOutputSchema(),
       ...toolWidgetDescriptorMeta(config, "shell"),
@@ -615,7 +624,7 @@ function registerCodexProcessTools(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return processToolResponse("exec_command", workspaceId, snapshot, {
+      return processToolResponse(config, "exec_command", workspaceId, snapshot, {
         command: cmd,
         workingDirectory: workingDirectory ?? ".",
         running: snapshot.running,
@@ -649,9 +658,9 @@ function registerCodexProcessTools(
           .number()
           .int()
           .positive()
-          .max(100_000)
+          .max(config.processOutputMaxTokens)
           .optional()
-          .describe("Approximate output token budget. Defaults to 10000."),
+          .describe(`Approximate output token budget. Defaults to ${config.processOutputDefaultTokens}; maximum ${config.processOutputMaxTokens}.`),
       },
       outputSchema: processOutputSchema(),
       ...toolWidgetDescriptorMeta(config, "shell"),
@@ -677,7 +686,7 @@ function registerCodexProcessTools(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return processToolResponse("write_stdin", workspaceId, snapshot, {
+      return processToolResponse(config, "write_stdin", workspaceId, snapshot, {
         sessionId,
         charactersWritten: chars?.length ?? 0,
         running: snapshot.running,
@@ -1010,17 +1019,22 @@ export function createMcpServer(
         durationMs: Math.round(performance.now() - startedAt),
       });
 
+      const metadata: {
+        tool: typeof toolNames.read;
+        card?: Record<string, unknown>;
+      } = { tool: toolNames.read };
+      if (shouldAttachWidget(config.widgets, "read")) {
+        metadata.card = {
+          workspaceId,
+          path: input.path,
+          summary,
+          payload: { content: response.content },
+        };
+      }
+
       return {
         ...response,
-        _meta: {
-          tool: toolNames.read,
-          card: {
-            workspaceId,
-            path: input.path,
-            summary,
-            payload: { content: response.content },
-          },
-        },
+        _meta: metadata,
         structuredContent: {
           result: contentText(response.content),
         },
@@ -1682,7 +1696,10 @@ export function createServer(
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
-  const processSessions = new ProcessSessionManager();
+  const processSessions = new ProcessSessionManager({
+    defaultMaxOutputTokens: config.processOutputDefaultTokens,
+    maxOutputTokens: config.processOutputMaxTokens,
+  });
   const activeMcpRequests = new Set<() => Promise<void>>();
 
   if (config.logging.trustProxy) {

@@ -70,6 +70,8 @@ interface ProcessSession {
 interface ProcessSessionManagerOptions {
   maxBufferCharacters?: number;
   completedSessionTtlMs?: number;
+  defaultMaxOutputTokens?: number;
+  maxOutputTokens?: number;
 }
 
 function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
@@ -218,11 +220,22 @@ export class ProcessSessionManager {
   private readonly sessions = new Map<number, ProcessSession>();
   private readonly maxBufferCharacters: number;
   private readonly completedSessionTtlMs: number;
+  private readonly defaultMaxOutputTokens: number;
+  private readonly maxOutputTokens: number;
   private nextSessionId = 1;
 
   constructor(options: ProcessSessionManagerOptions = {}) {
     this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
     this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
+    this.maxOutputTokens = options.maxOutputTokens ?? 100_000;
+    this.defaultMaxOutputTokens = options.defaultMaxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    if (
+      !Number.isInteger(this.defaultMaxOutputTokens) ||
+      this.defaultMaxOutputTokens < 1 ||
+      this.defaultMaxOutputTokens > this.maxOutputTokens
+    ) {
+      throw new Error("The default output limit must be positive and no greater than the maximum output limit.");
+    }
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
@@ -407,7 +420,7 @@ export class ProcessSessionManager {
   }
 
   private consume(session: ProcessSession, maxOutputTokens?: number): ProcessSnapshot {
-    const limit = boundedInteger(maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
+    const limit = boundedInteger(maxOutputTokens, this.defaultMaxOutputTokens, this.maxOutputTokens);
     const maxCharacters = Math.max(256, limit * 4);
     const buffered = session.buffer.drain(maxCharacters);
 

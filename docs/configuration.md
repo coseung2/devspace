@@ -129,6 +129,11 @@ MCP clients discover metadata from:
 | `full` | Exposes the minimal tools plus dedicated `grep`, `glob`, and `ls` tools. |
 | `codex` | Experimental. Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell tools are hidden. |
 
+`DEVSPACE_OUTPUT_PROFILE` controls the amount of process output returned to the
+host. `default` preserves the larger CLI-oriented limits. `web` uses a 3,000
+token default and caps each `exec_command` or `write_stdin` response at 12,000
+tokens, while retaining the full in-memory process buffer for later polls.
+
 `DEVSPACE_MINIMAL_TOOLS` remains a backward-compatible alias when
 `DEVSPACE_TOOL_MODE` is unset: `1` selects `minimal` and `0` selects `full`.
 The `codex` mode must be selected through `DEVSPACE_TOOL_MODE` and always uses

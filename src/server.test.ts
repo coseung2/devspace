@@ -175,6 +175,52 @@ test("changes mode keeps workspace execution independent from UI resources", asy
   });
 });
 
+test("web output profile advertises bounded process responses", async (t) => {
+  const context = await fixture(t, { outputProfile: "web", toolMode: "codex" });
+  const tools = await context.client.listTools();
+  const execTool = tools.tools.find((tool) => tool.name === "exec_command");
+  const maxOutputTokens = ((execTool?.inputSchema as {
+    properties?: { maxOutputTokens?: { maximum?: number } };
+  } | undefined)?.properties?.maxOutputTokens?.maximum);
+
+  assert.equal(maxOutputTokens, 12_000);
+  assert.match(context.client.getInstructions() ?? "", /3,000-token default and a 12,000-token maximum/);
+
+  const opened = await callOpen(context.client, context.project);
+  const workspaceId = String(structuredContent(opened).workspaceId);
+  const command = process.platform === "win32"
+    ? `"${process.execPath}" -e "console.log('z'.repeat(20000))"`
+    : `${JSON.stringify(process.execPath)} -e "console.log('z'.repeat(20000))"`;
+  const result = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId, cmd: command, yieldTimeMs: 2_000 },
+  });
+
+  assert.equal(structuredContent(result).outputTruncated, true);
+  assert.ok(responseText(result).length <= 13_000);
+});
+
+test("non-widget process and read responses omit duplicate card payloads", async (t) => {
+  const context = await fixture(t, { git: true, widgets: "changes", toolMode: "codex" });
+  const opened = await callOpen(context.client, context.project);
+  const workspaceId = String(structuredContent(opened).workspaceId);
+
+  const read = await context.client.callTool({
+    name: "read",
+    arguments: { workspaceId, path: "README.md" },
+  });
+  assert.equal((read._meta as Record<string, unknown> | undefined)?.card, undefined);
+
+  const command = process.platform === "win32"
+    ? `"${process.execPath}" -e "console.log('ok')"`
+    : `${JSON.stringify(process.execPath)} -e "console.log('ok')"`;
+  const exec = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId, cmd: command, yieldTimeMs: 2_000 },
+  });
+  assert.equal((exec._meta as Record<string, unknown> | undefined)?.card, undefined);
+});
+
 test("concurrent checkout opens return one full context and one reuse instruction", async (t) => {
   const context = await fixture(t);
   const [first, second] = await Promise.all([
@@ -348,7 +394,12 @@ interface ServerFixture {
 
 async function fixture(
   t: TestContext,
-  options: { git?: boolean; widgets?: "off" | "changes" | "full" } = {},
+  options: {
+    git?: boolean;
+    widgets?: "off" | "changes" | "full";
+    toolMode?: "minimal" | "full" | "codex";
+    outputProfile?: "default" | "web";
+  } = {},
 ): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
   const project = join(root, "project");
@@ -386,7 +437,8 @@ async function fixture(
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
     DEVSPACE_WIDGETS: options.widgets ?? "full",
-    DEVSPACE_TOOL_MODE: "full",
+    DEVSPACE_TOOL_MODE: options.toolMode ?? "full",
+    DEVSPACE_OUTPUT_PROFILE: options.outputProfile ?? "default",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     PORT: "1",
   });
@@ -396,7 +448,10 @@ async function fixture(
     config,
     workspaces,
     createReviewCheckpointManager(),
-    new ProcessSessionManager(),
+    new ProcessSessionManager({
+      defaultMaxOutputTokens: config.processOutputDefaultTokens,
+      maxOutputTokens: config.processOutputMaxTokens,
+    }),
     [],
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

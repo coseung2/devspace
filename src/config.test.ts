@@ -20,6 +20,12 @@ assert.equal(loadConfig(baseEnv).toolMode, "minimal");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "minimal" }).toolMode, "minimal");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "full" }).toolMode, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "codex" }).toolMode, "codex");
+assert.equal(loadConfig(baseEnv).outputProfile, "default");
+assert.equal(loadConfig(baseEnv).processOutputDefaultTokens, 10_000);
+assert.equal(loadConfig(baseEnv).processOutputMaxTokens, 100_000);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_OUTPUT_PROFILE: "web" }).outputProfile, "web");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_OUTPUT_PROFILE: "web" }).processOutputDefaultTokens, 3_000);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_OUTPUT_PROFILE: "web" }).processOutputMaxTokens, 12_000);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "0" }).toolMode, "full");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MINIMAL_TOOLS: "1" }).toolMode, "minimal");
 assert.equal(loadConfig(baseEnv).skillsEnabled, true);
@@ -57,6 +63,10 @@ assert.throws(
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "invalid" }),
   /Invalid DEVSPACE_TOOL_MODE: invalid/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_OUTPUT_PROFILE: "invalid" }),
+  /Invalid DEVSPACE_OUTPUT_PROFILE: invalid/,
 );
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_WORKSPACE_ALIASES: "[]" }),

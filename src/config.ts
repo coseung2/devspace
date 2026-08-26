@@ -7,9 +7,14 @@ import { devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
 
 export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
+export type OutputProfile = "default" | "web";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 100 * 1024 * 1024;
+const DEFAULT_PROCESS_OUTPUT_TOKENS = 10_000;
+const MAX_PROCESS_OUTPUT_TOKENS = 100_000;
+const WEB_PROCESS_OUTPUT_TOKENS = 3_000;
+const MAX_WEB_PROCESS_OUTPUT_TOKENS = 12_000;
 
 export interface ServerConfig {
   host: string;
@@ -21,6 +26,9 @@ export interface ServerConfig {
   publicBaseUrl: string;
   toolMode: ToolMode;
   widgets: WidgetMode;
+  outputProfile: OutputProfile;
+  processOutputDefaultTokens: number;
+  processOutputMaxTokens: number;
   stateDir: string;
   worktreeRoot: string;
   artifactsEnabled: boolean;
@@ -197,6 +205,19 @@ function parseWidgetMode(value: string | undefined): WidgetMode {
   throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }
 
+function parseOutputProfile(value: string | undefined): OutputProfile {
+  if (!value || value === "default") return "default";
+  if (value === "web") return "web";
+
+  throw new Error(`Invalid DEVSPACE_OUTPUT_PROFILE: ${value}`);
+}
+
+function processOutputLimits(profile: OutputProfile): { defaultTokens: number; maxTokens: number } {
+  return profile === "web"
+    ? { defaultTokens: WEB_PROCESS_OUTPUT_TOKENS, maxTokens: MAX_WEB_PROCESS_OUTPUT_TOKENS }
+    : { defaultTokens: DEFAULT_PROCESS_OUTPUT_TOKENS, maxTokens: MAX_PROCESS_OUTPUT_TOKENS };
+}
+
 function parseRequiredSecret(value: string | undefined, name: string): string {
   const secret = value?.trim();
   if (!secret) {
@@ -252,6 +273,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const allowedRoots = parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots);
   const workspaceAliases = parseWorkspaceAliases(env.DEVSPACE_WORKSPACE_ALIASES ?? files.config.workspaceAliases);
   assertWorkspaceAliasesAllowed(workspaceAliases, allowedRoots);
+  const outputProfile = parseOutputProfile(env.DEVSPACE_OUTPUT_PROFILE);
+  const outputLimits = processOutputLimits(outputProfile);
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -271,6 +294,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     publicBaseUrl,
     toolMode: parseToolMode(env),
     widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
+    outputProfile,
+    processOutputDefaultTokens: outputLimits.defaultTokens,
+    processOutputMaxTokens: outputLimits.maxTokens,
     stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     artifactsEnabled:
