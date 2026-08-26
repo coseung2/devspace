@@ -7,6 +7,7 @@ import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import * as z from "zod/v4";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
@@ -382,6 +383,166 @@ test("checkout reuse and context suppression survive a registry restart", async 
   } finally {
     await closeRestored();
   }
+});
+
+test("worker.spawn returns a durable Tasks extension handle and supports get update cancel", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const opened = await callOpen(context.client, context.project);
+  const workspaceId = String(structuredContent(opened).workspaceId);
+  const taskSchema = z.object({
+    resultType: z.enum(["task", "complete"]).optional(),
+    taskId: z.string(),
+    status: z.enum(["working", "input_required", "completed", "failed", "cancelled"]),
+    lastUpdatedAt: z.string(),
+    ttlMs: z.number().nullable(),
+  }).passthrough();
+  const taskCapabilityMeta = {
+    "io.modelcontextprotocol/clientCapabilities": {
+      extensions: { "io.modelcontextprotocol/tasks": {} },
+    },
+  };
+
+  const created = await context.client.request({
+    method: "tools/call",
+    params: {
+      name: "worker.spawn",
+      arguments: {
+        workspaceId,
+        cmd: "node -e \"console.log('READY_FOR_REVIEW')\"",
+        instruction: "Wait for review input",
+        requireApproval: true,
+        yieldTimeMs: 30_000,
+      },
+      _meta: taskCapabilityMeta,
+    },
+  }, taskSchema);
+  assert.equal(created.resultType, "task");
+  assert.equal(created.status, "input_required");
+
+  await assert.rejects(
+    context.client.request({
+      method: "tasks/get",
+      params: { taskId: created.taskId },
+    }, z.any()),
+    /Missing required client capability/,
+  );
+
+  const fetched = await context.client.request({
+    method: "tasks/get",
+    params: { taskId: created.taskId, _meta: taskCapabilityMeta },
+  }, taskSchema);
+  assert.equal(fetched.taskId, created.taskId);
+  assert.equal(fetched.status, "input_required");
+  assert.equal(fetched.result, undefined);
+
+  const emptySchema = z.object({ resultType: z.literal("complete") }).passthrough();
+  await context.client.request({
+    method: "tasks/update",
+    params: {
+      taskId: created.taskId,
+      inputResponses: { unknown: { action: "ignore" } },
+      _meta: taskCapabilityMeta,
+    },
+  }, emptySchema);
+  const stillWaiting = await context.client.request({
+    method: "tasks/get",
+    params: { taskId: created.taskId, _meta: taskCapabilityMeta },
+  }, taskSchema);
+  assert.equal(stillWaiting.status, "input_required");
+
+  await context.client.request({
+    method: "tasks/update",
+    params: {
+      taskId: created.taskId,
+      inputResponses: { review: { action: "approve" } },
+      _meta: taskCapabilityMeta,
+    },
+  }, emptySchema);
+  const resumed = await context.client.request({
+    method: "tasks/get",
+    params: { taskId: created.taskId, _meta: taskCapabilityMeta },
+  }, taskSchema);
+  assert.equal(resumed.status, "completed");
+  assert.ok(resumed.result);
+
+  await context.client.request({
+    method: "tasks/cancel",
+    params: { taskId: created.taskId, _meta: taskCapabilityMeta },
+  }, emptySchema);
+  const cancelled = await context.client.request({
+    method: "tasks/get",
+    params: { taskId: created.taskId, _meta: taskCapabilityMeta },
+  }, taskSchema);
+  assert.equal(cancelled.status, "completed");
+
+  const cancellable = await context.client.request({
+    method: "tools/call",
+    params: {
+      name: "worker.spawn",
+      arguments: {
+        workspaceId,
+        cmd: "node -e \"setTimeout(() => console.log('TOO_LATE'), 5000)\"",
+        yieldTimeMs: 0,
+      },
+      _meta: taskCapabilityMeta,
+    },
+  }, taskSchema);
+  await context.client.request({
+    method: "tasks/cancel",
+    params: { taskId: cancellable.taskId, _meta: taskCapabilityMeta },
+  }, emptySchema);
+  const cooperativelyCancelled = await context.client.request({
+    method: "tasks/get",
+    params: { taskId: cancellable.taskId, _meta: taskCapabilityMeta },
+  }, taskSchema);
+  assert.equal(cooperativelyCancelled.status, "cancelled");
+});
+
+test("task-backed command worker exposes terminal output and completes through worker.get", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const opened = await callOpen(context.client, context.project);
+  const workspaceId = String(structuredContent(opened).workspaceId);
+  const spawned = await context.client.callTool({
+    name: "worker.spawn",
+    arguments: {
+      workspaceId,
+      cmd: "node -e \"setTimeout(() => console.log('TASK_DONE'), 50)\"",
+      yieldTimeMs: 0,
+    },
+  });
+  const task = JSON.parse(responseText(spawned)) as { taskId: string };
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const fetched = await context.client.callTool({
+    name: "worker.get",
+    arguments: { taskId: task.taskId },
+  });
+  const completed = JSON.parse(responseText(fetched)) as {
+    status: string;
+    result?: { content?: Array<{ text?: string }> };
+  };
+  assert.equal(completed.status, "completed");
+  assert.match(completed.result?.content?.[0]?.text ?? "", /TASK_DONE/);
+});
+
+test("a non-zero worker command is a completed tool result with isError", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const opened = await callOpen(context.client, context.project);
+  const workspaceId = String(structuredContent(opened).workspaceId);
+  const spawned = await context.client.callTool({
+    name: "worker.spawn",
+    arguments: {
+      workspaceId,
+      cmd: "node -e \"process.exit(7)\"",
+      yieldTimeMs: 30_000,
+    },
+  });
+  const task = JSON.parse(responseText(spawned)) as {
+    status: string;
+    result?: { isError?: boolean; structuredContent?: { exitCode?: number } };
+  };
+  assert.equal(task.status, "completed");
+  assert.equal(task.result?.isError, true);
+  assert.equal(task.result?.structuredContent?.exitCode, 7);
 });
 
 interface ServerFixture {

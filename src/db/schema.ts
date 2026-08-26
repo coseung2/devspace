@@ -114,6 +114,33 @@ export const localAgentSessions = sqliteTable(
   ],
 );
 
+export const mcpTasks = sqliteTable(
+  "mcp_tasks",
+  {
+    taskId: text("task_id").primaryKey(),
+    callerKey: text("caller_key").notNull(),
+    operation: text("operation").notNull(),
+    workspaceId: text("workspace_id"),
+    agentId: text("agent_id"),
+    processSessionId: integer("process_session_id"),
+    status: text("status").notNull(),
+    statusMessage: text("status_message"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    pollIntervalMs: integer("poll_interval_ms").notNull(),
+    ttlMs: integer("ttl_ms"),
+    inputRequestsJson: text("input_requests_json").notNull(),
+    resultJson: text("result_json"),
+    error: text("error"),
+    cancelRequested: integer("cancel_requested").notNull().default(0),
+    approvalRequired: integer("approval_required").notNull().default(0),
+  },
+  (table) => [
+    index("mcp_tasks_caller_updated_idx").on(table.callerKey, table.updatedAt),
+    index("mcp_tasks_workspace_updated_idx").on(table.workspaceId, table.updatedAt),
+  ],
+);
+
 export type WorkspaceSessionRow = typeof workspaceSessions.$inferSelect;
 export type NewWorkspaceSessionRow = typeof workspaceSessions.$inferInsert;
 export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;
@@ -122,3 +149,5 @@ export type WorkspaceConversationBindingRow = typeof workspaceConversationBindin
 export type NewWorkspaceConversationBindingRow = typeof workspaceConversationBindings.$inferInsert;
 export type LocalAgentSessionRow = typeof localAgentSessions.$inferSelect;
 export type NewLocalAgentSessionRow = typeof localAgentSessions.$inferInsert;
+export type McpTaskRow = typeof mcpTasks.$inferSelect;
+export type NewMcpTaskRow = typeof mcpTasks.$inferInsert;

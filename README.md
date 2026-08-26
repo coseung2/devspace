@@ -141,6 +141,39 @@ DevSpace gives ChatGPT tools to:
 - discover local agent skills from your skill folders
 - select task-specific VM-local context from a central harness without exposing unmatched entries
 - show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
+- run command workers through the `worker.*` lifecycle and reconnect to durable MCP Tasks state
+
+### Async workers and browser workstation
+
+DevSpace advertises the `io.modelcontextprotocol/tasks` extension through
+`server/discover`. A client that opts in on a `worker.spawn` request can receive
+`resultType: "task"` and then use the protocol methods `tasks/get`,
+`tasks/update`, and `tasks/cancel`. Task IDs, caller ownership, lifecycle state,
+input responses, and terminal results are stored in the DevSpace SQLite state
+database, so completed and checkpointed tasks remain inspectable after a server
+restart.
+
+Stateless MCP request disconnects do not stop an active command: later
+`tasks/get` calls reconnect to the shared process session. A DevSpace process
+restart is a different boundary; Task records survive, but an active OS process
+session cannot currently be reattached and is reported as failed instead of
+remaining ambiguously `working`.
+
+The current worker runtime is a workspace command adapter backed by DevSpace's
+process-session manager. The public worker contract is `worker.catalog`,
+`worker.spawn`, `worker.get`, `worker.send_input`, `worker.resume`,
+`worker.approve`, `worker.cancel`, and `worker.close`.
+Set `requireApproval` on `worker.spawn` to retain a successful command result in
+`input_required` until `worker.approve` or the matching `tasks/update` response
+accepts it.
+
+Browser side panels can consume the loopback-only `/worker.snapshot` projection
+and `/worker.action` control adapter. These endpoints intentionally reject
+non-loopback callers and only grant browser CORS access to Chromium extension
+origins. They are an owner-level local control surface and intentionally span
+all OAuth callers on that single-user DevSpace instance. Bringing a remote
+DevSpace endpoint to localhost remains the responsibility of tunnel
+infrastructure outside DevSpace.
 
 ## Mental Model
 

@@ -46,6 +46,7 @@ import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { registerTaskTools } from "./task-tools.js";
 import {
   registerTaskContextTools,
   TASK_CONTEXT_SERVER_INSTRUCTION,
@@ -53,6 +54,8 @@ import {
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { openDatabase } from "./db/client.js";
+import { SqliteTaskStore, type TaskStore } from "./tasks.js";
 
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
@@ -703,6 +706,8 @@ export function createMcpServer(
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
+  taskStore?: TaskStore,
+  callerKey = "anonymous",
 ): McpServer {
   const server = new McpServer(
     {
@@ -1655,6 +1660,14 @@ export function createMcpServer(
     registerCodexProcessTools(server, config, workspaces, processSessions);
   }
 
+  registerTaskTools(server, {
+    config,
+    taskStore,
+    workspaces,
+    processSessions,
+    callerKey,
+  });
+
   if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
     registerArtifactTools(server, {
       config,
@@ -1694,6 +1707,8 @@ export function createServer(
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
   });
   const workspaceStore = createWorkspaceStore(config.stateDir);
+  const taskDatabase = openDatabase(config.stateDir);
+  const taskStore = new SqliteTaskStore(taskDatabase.sqlite);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager({
@@ -1757,6 +1772,174 @@ export function createServer(
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true, name: "devspace" });
+  });
+
+  const allowWorkstationRequest = (req: Request, res: Response): boolean => {
+    const address = req.socket.remoteAddress;
+    const isLoopback = address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+    if (!isLoopback) {
+      res.status(403).json({ error: "The workstation projection is loopback-only." });
+      return false;
+    }
+    const origin = req.header("origin");
+    if (!origin || !/^chrome-extension:\/\/[a-z]+$/i.test(origin)) {
+      res.status(403).json({ error: "The workstation projection requires a Chromium extension origin." });
+      return false;
+    }
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "content-type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    return true;
+  };
+
+  app.options("/worker.snapshot", (req, res) => {
+    if (!allowWorkstationRequest(req, res)) return;
+    res.sendStatus(204);
+  });
+  app.get("/worker.snapshot", async (req, res) => {
+    if (!allowWorkstationRequest(req, res)) return;
+    const tasks = await Promise.all(taskStore.listAll().map(async (storedTask) => {
+      let task = storedTask;
+      let processSnapshot: ProcessSnapshot | undefined;
+      if (task.status === "working" && task.workspaceId && task.processSessionId !== undefined) {
+        try {
+          processSnapshot = await processSessions.write({
+            workspaceId: task.workspaceId,
+            sessionId: task.processSessionId,
+            chars: "",
+            yieldTimeMs: 0,
+            maxOutputTokens: config.processOutputMaxTokens,
+          });
+          if (!processSnapshot.running) {
+            const result = {
+              content: [{ type: "text", text: processSnapshot.output || `Process exited with code ${processSnapshot.exitCode ?? "unknown"}.` }],
+              structuredContent: {
+                sessionId: processSnapshot.sessionId,
+                running: processSnapshot.running,
+                exitCode: processSnapshot.exitCode,
+                signal: processSnapshot.signal,
+                wallTimeMs: processSnapshot.wallTimeMs,
+                outputTruncated: processSnapshot.outputTruncated,
+              },
+              isError: processSnapshot.exitCode !== 0,
+            };
+            task = taskStore.update(task.taskId, task.callerKey, {
+              status: task.approvalRequired ? "input_required" : "completed",
+              statusMessage: task.approvalRequired
+                ? "Review and approval required."
+                : task.statusMessage,
+              result,
+            });
+          }
+        } catch {
+          task = taskStore.update(task.taskId, task.callerKey, {
+            status: "failed",
+            error: "The process session is unavailable after DevSpace restart.",
+          });
+        }
+      }
+      return {
+        taskId: task.taskId,
+        agentId: task.agentId,
+        operation: task.operation,
+        workspaceId: task.workspaceId,
+        status: task.status,
+        statusMessage: task.statusMessage,
+        createdAt: task.createdAt,
+        lastUpdatedAt: task.updatedAt,
+        ttlMs: task.ttlMs,
+        pollIntervalMs: task.pollIntervalMs,
+        inputRequests: task.status === "input_required" ? {
+          review: {
+            method: "elicitation/create",
+            params: {
+              mode: "form",
+              message: task.statusMessage ?? "Input required",
+              requestedSchema: {
+                type: "object",
+                properties: { approved: { type: "boolean" } },
+                required: ["approved"],
+              },
+            },
+          },
+        } : undefined,
+        result: task.status === "completed" ? task.result : undefined,
+        error: task.status === "failed" && task.error ? { code: -32603, message: task.error } : undefined,
+        process: task.processSessionId === undefined ? undefined : {
+          sessionId: task.processSessionId,
+          output: processSnapshot?.output,
+          outputTruncated: processSnapshot?.outputTruncated,
+          running: processSnapshot?.running,
+          exitCode: processSnapshot?.exitCode,
+          signal: processSnapshot?.signal,
+          wallTimeMs: processSnapshot?.wallTimeMs,
+        },
+      };
+    }));
+    res.json({
+      connected: true,
+      generatedAt: new Date().toISOString(),
+      tasks,
+    });
+  });
+
+  app.options("/worker.action", (req, res) => {
+    if (!allowWorkstationRequest(req, res)) return;
+    res.sendStatus(204);
+  });
+  app.post("/worker.action", async (req, res) => {
+    if (!allowWorkstationRequest(req, res)) return;
+    const body = req.body as { action?: unknown; taskId?: unknown; input?: unknown } | undefined;
+    const action = typeof body?.action === "string" ? body.action : undefined;
+    const taskId = typeof body?.taskId === "string" ? body.taskId : undefined;
+    if (!action || !taskId) {
+      res.status(400).json({ error: "action and taskId are required." });
+      return;
+    }
+    const task = taskStore.listAll().find((candidate) => candidate.taskId === taskId);
+    if (!task) {
+      res.status(404).json({ error: `Task ${taskId} not found.` });
+      return;
+    }
+    try {
+      if (action === "cancel") {
+        if (task.workspaceId && task.processSessionId !== undefined) {
+          await processSessions.write({
+            workspaceId: task.workspaceId,
+            sessionId: task.processSessionId,
+            chars: "\u0003",
+            yieldTimeMs: 0,
+            maxOutputTokens: config.processOutputMaxTokens,
+          }).catch(() => undefined);
+        }
+        taskStore.requestCancel(taskId, task.callerKey);
+      } else if (action === "approve" || action === "resume") {
+        taskStore.update(taskId, task.callerKey, {
+          status: action === "approve" && task.approvalRequired && task.result !== undefined ? "completed" : "working",
+          statusMessage: action === "approve" ? "Review approved." : "Worker resumed.",
+          inputResponse: typeof body?.input === "string" ? body.input : undefined,
+        });
+      } else if (action === "send_input") {
+        const input = typeof body?.input === "string" ? body.input : "";
+        if (task.workspaceId && task.processSessionId !== undefined) {
+          await processSessions.write({
+            workspaceId: task.workspaceId,
+            sessionId: task.processSessionId,
+            chars: input,
+            yieldTimeMs: 250,
+            maxOutputTokens: config.processOutputMaxTokens,
+          });
+        }
+        taskStore.update(taskId, task.callerKey, { inputResponse: input, status: "working" });
+      } else {
+        res.status(400).json({ error: `Unsupported action: ${action}` });
+        return;
+      }
+      res.json({ ok: true, task: taskStore.get(taskId, task.callerKey) });
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.all("/mcp", async (req, res) => {
@@ -1823,6 +2006,8 @@ export function createServer(
         reviewCheckpoints,
         processSessions,
         incomingArtifactAdapters,
+        taskStore,
+        req.auth?.clientId ?? "anonymous",
       );
       activeMcpRequests.add(closeRequestServer);
       await mcpServer.connect(transport);
@@ -1851,6 +2036,7 @@ export function createServer(
         processSessions.shutdown();
         oauthProvider.close();
         workspaceStore.close?.();
+        taskDatabase.close();
       })();
       return closePromise;
     },

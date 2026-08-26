@@ -82,7 +82,22 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     await waitForListening(httpServer);
     const address = httpServer.address();
     assert.ok(address && typeof address === "object");
-    const endpoint = `http://127.0.0.1:${address.port}/mcp`;
+    let endpoint = `http://127.0.0.1:${address.port}/mcp`;
+    const workstationEndpoint = `http://127.0.0.1:${address.port}`;
+    const taskCapabilityMeta = {
+      "io.modelcontextprotocol/clientCapabilities": {
+        extensions: { "io.modelcontextprotocol/tasks": {} },
+      },
+    };
+
+    const projectionResponse = await fetch(`${workstationEndpoint}/worker.snapshot`, {
+      headers: { origin: "chrome-extension://abcdefghijklmnop" },
+    });
+    assert.equal(projectionResponse.status, 200);
+    assert.equal(projectionResponse.headers.get("access-control-allow-origin"), "chrome-extension://abcdefghijklmnop");
+    const projection = await projectionResponse.json() as { connected?: boolean; tasks?: unknown[] };
+    assert.equal(projection.connected, true);
+    assert.deepEqual(projection.tasks, []);
 
     const initializeResponse = await postMcp(endpoint, accessToken, {
       jsonrpc: "2.0",
@@ -121,6 +136,101 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     const workspaceId = getStructuredContent(openBody).workspaceId;
     assert.equal(typeof workspaceId, "string");
 
+    const discoverResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 20,
+      method: "server/discover",
+      params: {},
+    });
+    const discoverBody = await readJsonRpc(discoverResponse);
+    assert.deepEqual(
+      (discoverBody.result?.capabilities as { extensions?: Record<string, unknown> } | undefined)?.extensions?.["io.modelcontextprotocol/tasks"],
+      {},
+    );
+
+    const spawnResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: {
+        name: "worker.spawn",
+        arguments: {
+          workspaceId,
+          cmd: "node -e \"console.log('READY_FOR_HTTP_REVIEW')\"",
+          instruction: "Wait for approval",
+          requireApproval: true,
+          yieldTimeMs: 30_000,
+        },
+        _meta: taskCapabilityMeta,
+      },
+    });
+    const spawnBody = await readJsonRpc(spawnResponse);
+    assert.equal(spawnBody.result?.resultType, "task");
+    assert.equal(spawnBody.result?.status, "input_required");
+    const taskId = String(spawnBody.result?.taskId);
+
+    const missingCapabilityResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 28,
+      method: "tasks/get",
+      params: { taskId },
+    });
+    assert.equal((await readJsonRpc(missingCapabilityResponse, true)).error?.code, -32003);
+
+    const taskResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tasks/get",
+      params: { taskId, _meta: taskCapabilityMeta },
+    });
+    const taskBody = await readJsonRpc(taskResponse);
+    assert.equal(taskBody.result?.taskId, taskId);
+    assert.equal(taskBody.result?.status, "input_required");
+    assert.equal(taskBody.result?.resultType, "complete");
+
+    const updateResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tasks/update",
+      params: { taskId, inputResponses: { review: { action: "approve" } }, _meta: taskCapabilityMeta },
+    });
+    assert.deepEqual((await readJsonRpc(updateResponse)).result, { resultType: "complete" });
+
+    const cancelResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 24,
+      method: "tasks/cancel",
+      params: { taskId, _meta: taskCapabilityMeta },
+    });
+    assert.deepEqual((await readJsonRpc(cancelResponse)).result, { resultType: "complete" });
+
+    const commandSpawnResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 26,
+      method: "tools/call",
+      params: {
+        name: "worker.spawn",
+        arguments: {
+          workspaceId,
+          cmd: "node -e \"setTimeout(() => console.log('HTTP_TASK_DONE'), 50)\"",
+          yieldTimeMs: 0,
+        },
+        _meta: taskCapabilityMeta,
+      },
+    });
+    const commandSpawnBody = await readJsonRpc(commandSpawnResponse);
+    const commandTaskId = String(commandSpawnBody.result?.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const commandGetResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 27,
+      method: "tasks/get",
+      params: { taskId: commandTaskId, _meta: taskCapabilityMeta },
+    });
+    const commandGetBody = await readJsonRpc(commandGetResponse);
+    assert.equal(commandGetBody.result?.status, "completed");
+    assert.match(JSON.stringify(commandGetBody.result?.result), /HTTP_TASK_DONE/);
+
     // A stale stateful session would be rejected with 404; stateless requests ignore it.
     const readResponse = await postMcp(
       endpoint,
@@ -142,6 +252,27 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     assert.equal(readBody.id, 3);
     assert.ok(readBody.result);
     assert.equal(getStructuredContent(readBody).result, "stateless HTTP works\n");
+
+    await closeHttpServer(httpServer);
+    httpServer = undefined;
+    await running.close();
+    running = undefined;
+
+    running = createServer(config);
+    httpServer = running.app.listen(0, config.host);
+    await waitForListening(httpServer);
+    const restoredAddress = httpServer.address();
+    assert.ok(restoredAddress && typeof restoredAddress === "object");
+    endpoint = `http://127.0.0.1:${restoredAddress.port}/mcp`;
+    const restoredTaskResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 25,
+      method: "tasks/get",
+      params: { taskId, _meta: taskCapabilityMeta },
+    });
+    const restoredTaskBody = await readJsonRpc(restoredTaskResponse);
+    assert.equal(restoredTaskBody.result?.taskId, taskId);
+    assert.equal(restoredTaskBody.result?.status, "completed");
 
     const getResponse = await fetch(endpoint, {
       headers: {
@@ -207,6 +338,12 @@ async function postMcp(
     "content-type": "application/json",
     "mcp-protocol-version": MCP_PROTOCOL_VERSION,
   });
+  const method = typeof body.method === "string" ? body.method : undefined;
+  const params = body.params as { taskId?: unknown } | undefined;
+  if (method?.startsWith("tasks/") && typeof params?.taskId === "string") {
+    headers.set("mcp-method", method);
+    headers.set("mcp-name", params.taskId);
+  }
   if (sessionId !== undefined) headers.set("mcp-session-id", sessionId);
 
   return fetch(endpoint, {
@@ -223,7 +360,7 @@ interface JsonRpcBody {
   error?: Record<string, unknown>;
 }
 
-async function readJsonRpc(response: Response): Promise<JsonRpcBody> {
+async function readJsonRpc(response: Response, allowError = false): Promise<JsonRpcBody> {
   const text = await response.text();
   const contentType = response.headers.get("content-type") ?? "";
   const sseData = contentType.includes("text/event-stream")
@@ -231,7 +368,7 @@ async function readJsonRpc(response: Response): Promise<JsonRpcBody> {
     : undefined;
   const body = JSON.parse(sseData ?? text) as JsonRpcBody;
   assert.equal(body.jsonrpc, "2.0");
-  assert.equal(body.error, undefined);
+  if (!allowError) assert.equal(body.error, undefined);
   return body;
 }
 

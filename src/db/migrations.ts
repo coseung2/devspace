@@ -27,6 +27,16 @@ const migrations: Migration[] = [
     name: "workspace-conversation-bindings",
     up: migrateWorkspaceConversationBindings,
   },
+  {
+    version: 5,
+    name: "mcp-tasks",
+    up: migrateMcpTasks,
+  },
+  {
+    version: 6,
+    name: "mcp-task-approval",
+    up: migrateMcpTaskApproval,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -198,9 +208,43 @@ function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
   `);
 }
 
+function migrateMcpTasks(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists mcp_tasks (
+      task_id text primary key,
+      caller_key text not null,
+      operation text not null,
+      workspace_id text,
+      agent_id text,
+      process_session_id integer,
+      status text not null,
+      status_message text,
+      created_at text not null,
+      updated_at text not null,
+      poll_interval_ms integer not null,
+      ttl_ms integer,
+      input_requests_json text not null,
+      result_json text,
+      error text,
+      cancel_requested integer not null default 0,
+      approval_required integer not null default 0
+    );
+
+    create index if not exists mcp_tasks_caller_updated_idx
+      on mcp_tasks(caller_key, updated_at desc);
+
+    create index if not exists mcp_tasks_workspace_updated_idx
+      on mcp_tasks(workspace_id, updated_at desc);
+  `);
+}
+
+function migrateMcpTaskApproval(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "mcp_tasks", "approval_required", "integer not null default 0");
+}
+
 function addColumnIfMissing(
   sqlite: Database.Database,
-  table: "workspace_sessions" | "local_agent_sessions",
+    table: "workspace_sessions" | "local_agent_sessions" | "mcp_tasks",
   column: string,
   definition: string,
 ): void {
