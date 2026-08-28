@@ -373,6 +373,7 @@ export function registerTaskTools(
   });
 
   installTaskAugmentedToolResult(server, "worker.spawn");
+  installTaskAugmentedToolResult(server, "agent.spawn");
 
   return {
     snapshot: async (snapshotCallerKey = callerKey) => {
