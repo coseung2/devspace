@@ -220,16 +220,20 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     });
     const commandSpawnBody = await readJsonRpc(commandSpawnResponse);
     const commandTaskId = String(commandSpawnBody.result?.taskId);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const commandGetResponse = await postMcp(endpoint, accessToken, {
-      jsonrpc: "2.0",
-      id: 27,
-      method: "tasks/get",
-      params: { taskId: commandTaskId, _meta: taskCapabilityMeta },
-    });
-    const commandGetBody = await readJsonRpc(commandGetResponse);
-    assert.equal(commandGetBody.result?.status, "completed");
-    assert.match(JSON.stringify(commandGetBody.result?.result), /HTTP_TASK_DONE/);
+    let commandGetBody: JsonRpcBody | undefined;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const commandGetResponse = await postMcp(endpoint, accessToken, {
+        jsonrpc: "2.0",
+        id: 27,
+        method: "tasks/get",
+        params: { taskId: commandTaskId, _meta: taskCapabilityMeta },
+      });
+      commandGetBody = await readJsonRpc(commandGetResponse);
+      if (commandGetBody.result?.status === "completed") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(commandGetBody?.result?.status, "completed");
+    assert.match(JSON.stringify(commandGetBody?.result?.result), /HTTP_TASK_DONE/);
 
     // A stale stateful session would be rejected with 404; stateless requests ignore it.
     const readResponse = await postMcp(
