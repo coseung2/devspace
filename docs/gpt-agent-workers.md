@@ -45,7 +45,15 @@ Canonical MCP tools:
 - `agent.complete`
 - `agent.fail`
 
-ChatGPT Apps-compatible aliases use underscores instead of dots, for example `agent_spawn` and `agent_complete`.
+ChatGPT Apps-compatible aliases use underscores instead of dots. The preferred
+ChatGPT-facing names are `gpt_worker_spawn`, `gpt_worker_get`,
+`gpt_worker_revise`, `gpt_worker_approve`, `gpt_worker_cancel`,
+`gpt_worker_complete`, and `gpt_worker_fail`.
+
+The older `agent_*` aliases remain registered for compatibility, but some
+ChatGPT surfaces may reserve or suppress names beginning with `agent`. The
+`gpt_worker_*` aliases avoid that namespace collision while mapping to the same
+DevSpace task lifecycle.
 
 `agent.spawn` also participates in the MCP Tasks extension when the client advertises task support, so a parent host can treat a long-running GPT worker like the existing `worker.spawn` task lifecycle.
 
@@ -64,7 +72,7 @@ The parent does not allocate worktrees manually. A revision reuses the same work
 
 Create or publish a ChatGPT Workspace Agent intended for coding work and connect the same DevSpace MCP server to that agent.
 
-The worker must be allowed to use the DevSpace tools required for its job, including the `agent_complete` and `agent_fail` callback tools. Keep its external tools constrained to the minimum needed for development work.
+The worker must be allowed to use the DevSpace tools required for its job, including the `gpt_worker_complete` and `gpt_worker_fail` callback tools. Keep its external tools constrained to the minimum needed for development work.
 
 Add an API trigger channel to the Workspace Agent and copy the trigger endpoint and access token supplied by Agent Studio. Configure both values on the DevSpace server:
 

@@ -406,6 +406,53 @@ export function registerAgentTools(
     inputSchema: failureSchema,
     ...writeMeta,
   }, async (input) => textResult(coordinator.fail(input)));
+
+  // Some ChatGPT surfaces reserve or suppress tool names beginning with
+  // `agent`. Keep the canonical/legacy names above, but also expose a neutral
+  // GPT-worker namespace so both parent sessions and Workspace Agents can use
+  // the lifecycle reliably through the app connector.
+  registerAppTool(server, "gpt_worker_spawn", {
+    title: "Spawn GPT worker task",
+    description: "ChatGPT-safe alias for agent.spawn.",
+    inputSchema: spawnSchema,
+    ...writeMeta,
+  }, async (input) => textResult(await coordinator.spawn(input)));
+  registerAppTool(server, "gpt_worker_get", {
+    title: "Get GPT worker task",
+    description: "ChatGPT-safe alias for agent.get.",
+    inputSchema: taskIdSchema,
+    ...readMeta,
+  }, async ({ taskId }) => textResult(coordinator.get(taskId)));
+  registerAppTool(server, "gpt_worker_revise", {
+    title: "Revise GPT worker task",
+    description: "ChatGPT-safe alias for agent.revise.",
+    inputSchema: revisionSchema,
+    ...writeMeta,
+  }, async (input) => textResult(await coordinator.revise(input)));
+  registerAppTool(server, "gpt_worker_approve", {
+    title: "Approve GPT worker task",
+    description: "ChatGPT-safe alias for agent.approve.",
+    inputSchema: taskIdSchema,
+    ...writeMeta,
+  }, async ({ taskId }) => textResult(coordinator.approve(taskId)));
+  registerAppTool(server, "gpt_worker_cancel", {
+    title: "Cancel GPT worker task",
+    description: "ChatGPT-safe alias for agent.cancel.",
+    inputSchema: taskIdSchema,
+    ...writeMeta,
+  }, async ({ taskId }) => textResult(coordinator.cancel(taskId)));
+  registerAppTool(server, "gpt_worker_complete", {
+    title: "Complete GPT worker pass",
+    description: "Worker-only ChatGPT-safe callback alias for agent.complete.",
+    inputSchema: completionSchema,
+    ...writeMeta,
+  }, async (input) => textResult(coordinator.complete(input)));
+  registerAppTool(server, "gpt_worker_fail", {
+    title: "Fail GPT worker pass",
+    description: "Worker-only ChatGPT-safe callback alias for agent.fail.",
+    inputSchema: failureSchema,
+    ...writeMeta,
+  }, async (input) => textResult(coordinator.fail(input)));
 }
 
 function resolveIsolation(input: AgentSpawnInput): "worktree" | "shared" {
@@ -426,8 +473,8 @@ function buildDispatchPrompt(input: {
     `DevSpace workspace ID: ${input.workspaceId}`,
     "Work only in that DevSpace workspace. Do not open or switch to the parent checkout.",
     "Follow the workspace instructions returned by DevSpace and perform the requested work, including appropriate tests.",
-    "When the pass is ready for parent review, call DevSpace agent_complete with the task ID, callback token, concise summary, changed files, tests, and commit SHA if one exists.",
-    "If the pass cannot be completed, call DevSpace agent_fail with the task ID, callback token, and error.",
+    "When the pass is ready for parent review, call DevSpace gpt_worker_complete with the task ID, callback token, concise summary, changed files, tests, and commit SHA if one exists.",
+    "If the pass cannot be completed, call DevSpace gpt_worker_fail with the task ID, callback token, and error.",
     `Callback token: ${input.callbackToken}`,
     "Task:",
     input.task,
