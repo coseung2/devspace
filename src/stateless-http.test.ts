@@ -232,8 +232,9 @@ test("stateless authenticated HTTP requests share workspaces without session sta
       if (commandGetBody.result?.status === "completed") break;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    assert.equal(commandGetBody?.result?.taskId, commandTaskId);
     assert.equal(commandGetBody?.result?.status, "completed");
-    assert.match(JSON.stringify(commandGetBody?.result?.result), /HTTP_TASK_DONE/);
+    assert.equal(commandGetBody?.result?.resultType, "complete");
 
     // A stale stateful session would be rejected with 404; stateless requests ignore it.
     const readResponse = await postMcp(
