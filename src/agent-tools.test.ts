@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentTaskCoordinator } from "./agent-tools.js";
 import { InMemoryTaskStore } from "./tasks.js";
+import type { AgentDispatchRequest } from "./workspace-agent-dispatch.js";
 import type { Workspace, WorkspaceRegistry } from "./workspaces.js";
 
 function workspace(id: string, root: string, mode: "checkout" | "worktree", sourceRoot?: string): Workspace {
@@ -56,7 +57,7 @@ function fakeRegistry() {
 test("agent spawn auto-isolates write-capable work and waits for parent review", async () => {
   const store = new InMemoryTaskStore();
   const { registry, getOpenCount } = fakeRegistry();
-  const coordinator = new AgentTaskCoordinator(store, registry, "parent-conversation");
+  const coordinator = new AgentTaskCoordinator(store, registry, "parent-client");
 
   const spawned = await coordinator.spawn({
     workspaceId: "ws_parent",
@@ -66,6 +67,7 @@ test("agent spawn auto-isolates write-capable work and waits for parent review",
   assert.equal(getOpenCount(), 1);
   assert.equal(spawned.workspaceId, "ws_child");
   assert.equal(spawned.isolation, "worktree");
+  assert.equal(spawned.dispatch, "manual");
   assert.equal(spawned.status, "working");
   assert.match(spawned.dispatchPrompt, /Fix auth race/);
   assert.match(spawned.dispatchPrompt, new RegExp(spawned.taskId));
@@ -99,7 +101,7 @@ test("agent spawn auto-isolates write-capable work and waits for parent review",
 test("read-only auto mode shares the checkout", async () => {
   const store = new InMemoryTaskStore();
   const { registry, getOpenCount } = fakeRegistry();
-  const coordinator = new AgentTaskCoordinator(store, registry, "parent-conversation");
+  const coordinator = new AgentTaskCoordinator(store, registry, "parent-client");
 
   const spawned = await coordinator.spawn({
     workspaceId: "ws_parent",
@@ -112,10 +114,56 @@ test("read-only auto mode shares the checkout", async () => {
   assert.equal(spawned.isolation, "shared");
 });
 
+test("configured dispatcher launches the generated child prompt automatically", async () => {
+  const store = new InMemoryTaskStore();
+  const { registry } = fakeRegistry();
+  let dispatched: AgentDispatchRequest | undefined;
+  const coordinator = new AgentTaskCoordinator(
+    store,
+    registry,
+    "parent-client",
+    async (request) => {
+      dispatched = request;
+    },
+  );
+
+  const spawned = await coordinator.spawn({
+    workspaceId: "ws_parent",
+    task: "Implement the worker flow",
+  });
+
+  assert.equal(spawned.dispatch, "automatic");
+  assert.equal(dispatched?.taskId, spawned.taskId);
+  assert.equal(dispatched?.workspaceId, spawned.workspaceId);
+  assert.equal(dispatched?.prompt, spawned.dispatchPrompt);
+});
+
+test("dispatcher failures become durable failed tasks", async () => {
+  const store = new InMemoryTaskStore();
+  const { registry } = fakeRegistry();
+  const coordinator = new AgentTaskCoordinator(
+    store,
+    registry,
+    "parent-client",
+    async () => {
+      throw new Error("trigger unavailable");
+    },
+  );
+
+  const spawned = await coordinator.spawn({
+    workspaceId: "ws_parent",
+    task: "Will fail to dispatch",
+  });
+
+  assert.equal(spawned.dispatch, "automatic");
+  assert.equal(spawned.status, "failed");
+  assert.equal(spawned.error, "trigger unavailable");
+});
+
 test("revision reuses the same worktree and rotates callback capability", async () => {
   const store = new InMemoryTaskStore();
   const { registry } = fakeRegistry();
-  const coordinator = new AgentTaskCoordinator(store, registry, "parent-conversation");
+  const coordinator = new AgentTaskCoordinator(store, registry, "parent-client");
 
   const spawned = await coordinator.spawn({ workspaceId: "ws_parent", task: "First pass" });
   coordinator.complete({
@@ -124,7 +172,7 @@ test("revision reuses the same worktree and rotates callback capability", async 
     summary: "First pass ready",
   });
 
-  const revised = coordinator.revise({
+  const revised = await coordinator.revise({
     taskId: spawned.taskId,
     instruction: "Address review comment",
   });
