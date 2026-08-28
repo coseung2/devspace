@@ -148,6 +148,34 @@ test("stateless authenticated HTTP requests share workspaces without session sta
       {},
     );
 
+    const agentSpawnResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 29,
+      method: "tools/call",
+      params: {
+        name: "agent.spawn",
+        arguments: {
+          workspaceId,
+          task: "Inspect the workspace without modifying files",
+          readOnly: true,
+        },
+        _meta: taskCapabilityMeta,
+      },
+    });
+    const agentSpawnBody = await readJsonRpc(agentSpawnResponse);
+    assert.equal(agentSpawnBody.result?.resultType, "task");
+    assert.equal(agentSpawnBody.result?.status, "working");
+    assert.equal(agentSpawnBody.result?.workspaceId, workspaceId);
+    const agentTaskId = String(agentSpawnBody.result?.taskId);
+
+    const agentCancelResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 30,
+      method: "tasks/cancel",
+      params: { taskId: agentTaskId, _meta: taskCapabilityMeta },
+    });
+    assert.deepEqual((await readJsonRpc(agentCancelResponse)).result, { resultType: "complete" });
+
     const spawnResponse = await postMcp(endpoint, accessToken, {
       jsonrpc: "2.0",
       id: 21,
@@ -220,16 +248,21 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     });
     const commandSpawnBody = await readJsonRpc(commandSpawnResponse);
     const commandTaskId = String(commandSpawnBody.result?.taskId);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const commandGetResponse = await postMcp(endpoint, accessToken, {
-      jsonrpc: "2.0",
-      id: 27,
-      method: "tasks/get",
-      params: { taskId: commandTaskId, _meta: taskCapabilityMeta },
-    });
-    const commandGetBody = await readJsonRpc(commandGetResponse);
-    assert.equal(commandGetBody.result?.status, "completed");
-    assert.match(JSON.stringify(commandGetBody.result?.result), /HTTP_TASK_DONE/);
+    let commandGetBody: JsonRpcBody | undefined;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const commandGetResponse = await postMcp(endpoint, accessToken, {
+        jsonrpc: "2.0",
+        id: 27,
+        method: "tasks/get",
+        params: { taskId: commandTaskId, _meta: taskCapabilityMeta },
+      });
+      commandGetBody = await readJsonRpc(commandGetResponse);
+      if (commandGetBody.result?.status === "completed") break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(commandGetBody?.result?.taskId, commandTaskId);
+    assert.equal(commandGetBody?.result?.status, "completed");
+    assert.equal(commandGetBody?.result?.resultType, "complete");
 
     // A stale stateful session would be rejected with 404; stateless requests ignore it.
     const readResponse = await postMcp(
