@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { loadDevspaceFiles, writeDevspaceConfig } from "./user-config.js";
 
@@ -72,8 +72,9 @@ assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_WORKSPACE_ALIASES: "[]" }),
   /Invalid workspaceAliases/,
 );
+const outsideRoot = resolve(parse(process.cwd()).root, "definitely-outside-devspace-root");
 assert.throws(
-  () => loadConfig({ ...baseEnv, DEVSPACE_WORKSPACE_ALIASES: JSON.stringify({ secret: "C:/outside" }) }),
+  () => loadConfig({ ...baseEnv, DEVSPACE_WORKSPACE_ALIASES: JSON.stringify({ secret: outsideRoot }) }),
   /points outside allowed roots/,
 );
 
