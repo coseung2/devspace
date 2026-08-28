@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
+import { registerAgentTools } from "./agent-tools.js";
 import type { ServerConfig } from "./config.js";
 import type { ProcessSessionManager, ProcessSnapshot } from "./process-sessions.js";
 import { InMemoryTaskStore, type TaskRecord, type TaskStore } from "./tasks.js";
@@ -58,6 +59,12 @@ export function registerTaskTools(
 ): TaskTools {
   const store = options.taskStore ?? new InMemoryTaskStore();
   const callerKey = options.callerKey ?? "anonymous";
+
+  registerAgentTools(server, {
+    taskStore: store,
+    workspaces: options.workspaces,
+    callerKey,
+  });
 
   const taskView = (record: TaskRecord, snapshot?: ProcessSnapshot) => ({
     resultType: "complete" as const,
