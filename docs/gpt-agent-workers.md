@@ -79,6 +79,10 @@ When configured, `agent.spawn` posts the generated prompt to the Workspace Agent
 
 The trigger URL is restricted to HTTPS on `api.chatgpt.com` and the Workspace Agent trigger path. Tokens are never included in task state, tool output, or normal error text.
 
+Transient Workspace Agent trigger failures are retried up to three times with 2s, 5s, and 10s delays. HTTP 409, 429, and 5xx responses, plus request-level failures such as timeouts or connection errors, are retryable. Authentication/authorization failures and other non-retryable 4xx responses fail immediately.
+
+All attempts for one dispatch use the same `Idempotency-Key`, so a retry cannot enqueue a duplicate trigger event if the previous attempt was accepted but its response was lost. Retry logs include the DevSpace task/workspace IDs, attempt number, status or sanitized request error, and delay; the Workspace Agent access token is redacted.
+
 ## Callback capability
 
 A worker pass receives a random one-use-style callback capability in its dispatch prompt. DevSpace persists only the SHA-256 hash in task history.
