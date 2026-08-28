@@ -6,6 +6,7 @@ import { registerAgentTools } from "./agent-tools.js";
 import type { ServerConfig } from "./config.js";
 import type { ProcessSessionManager, ProcessSnapshot } from "./process-sessions.js";
 import { InMemoryTaskStore, type TaskRecord, type TaskStore } from "./tasks.js";
+import { registerWorkerAppTools } from "./worker-app-tools.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
 
 const taskIdSchema = z.string().min(1).describe("Durable MCP task identifier.");
@@ -63,6 +64,13 @@ export function registerTaskTools(
   registerAgentTools(server, {
     taskStore: store,
     workspaces: options.workspaces,
+    callerKey,
+  });
+  registerWorkerAppTools(server, {
+    config: options.config,
+    taskStore: store,
+    workspaces: options.workspaces,
+    processSessions: options.processSessions,
     callerKey,
   });
 
