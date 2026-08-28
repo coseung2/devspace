@@ -148,6 +148,34 @@ test("stateless authenticated HTTP requests share workspaces without session sta
       {},
     );
 
+    const agentSpawnResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 29,
+      method: "tools/call",
+      params: {
+        name: "agent.spawn",
+        arguments: {
+          workspaceId,
+          task: "Inspect the workspace without modifying files",
+          readOnly: true,
+        },
+        _meta: taskCapabilityMeta,
+      },
+    });
+    const agentSpawnBody = await readJsonRpc(agentSpawnResponse);
+    assert.equal(agentSpawnBody.result?.resultType, "task");
+    assert.equal(agentSpawnBody.result?.status, "working");
+    assert.equal(agentSpawnBody.result?.workspaceId, workspaceId);
+    const agentTaskId = String(agentSpawnBody.result?.taskId);
+
+    const agentCancelResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 30,
+      method: "tasks/cancel",
+      params: { taskId: agentTaskId, _meta: taskCapabilityMeta },
+    });
+    assert.deepEqual((await readJsonRpc(agentCancelResponse)).result, { resultType: "complete" });
+
     const spawnResponse = await postMcp(endpoint, accessToken, {
       jsonrpc: "2.0",
       id: 21,
