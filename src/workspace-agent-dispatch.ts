@@ -1,3 +1,5 @@
+const WORKSPACE_AGENT_TRIGGER_TIMEOUT_MS = 15_000;
+
 export interface AgentDispatchRequest {
   taskId: string;
   workspaceId: string;
@@ -48,6 +50,7 @@ export function createWorkspaceAgentDispatcher(
       },
       body: JSON.stringify({ input: prompt }),
       redirect: "error",
+      signal: AbortSignal.timeout(WORKSPACE_AGENT_TRIGGER_TIMEOUT_MS),
     });
 
     if (response.status === 202) return;
