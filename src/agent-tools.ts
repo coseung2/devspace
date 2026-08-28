@@ -3,6 +3,10 @@ import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import type { TaskRecord, TaskStore } from "./tasks.js";
+import {
+  workspaceAgentDispatcherFromEnv,
+  type AgentDispatcher,
+} from "./workspace-agent-dispatch.js";
 import type { Workspace, WorkspaceRegistry } from "./workspaces.js";
 
 const CALLBACK_HASH_PREFIX = "__agent_callback_sha256:";
@@ -70,6 +74,7 @@ export interface AgentTaskView {
 export interface AgentSpawnResult extends AgentTaskView {
   callbackToken: string;
   dispatchPrompt: string;
+  dispatch: "automatic" | "manual";
   isolation: "worktree" | "shared";
 }
 
@@ -78,6 +83,7 @@ export class AgentTaskCoordinator {
     private readonly store: TaskStore,
     private readonly workspaces: WorkspaceRegistry,
     private readonly callerKey = "anonymous",
+    private readonly dispatcher?: AgentDispatcher,
   ) {}
 
   async spawn(input: AgentSpawnInput): Promise<AgentSpawnResult> {
@@ -108,15 +114,19 @@ export class AgentTaskCoordinator {
     });
 
     const updated = this.requireOwned(record.taskId);
-    return {
-      ...this.view(updated, workerWorkspace),
+    const dispatchPrompt = buildDispatchPrompt({
+      taskId: updated.taskId,
       callbackToken,
-      dispatchPrompt: buildDispatchPrompt({
-        taskId: updated.taskId,
-        callbackToken,
-        workspaceId: workerWorkspace.id,
-        task: input.task,
-      }),
+      workspaceId: workerWorkspace.id,
+      task: input.task,
+    });
+    const dispatchResult = await this.maybeDispatch(updated, dispatchPrompt);
+
+    return {
+      ...this.view(dispatchResult.record, workerWorkspace),
+      callbackToken,
+      dispatchPrompt,
+      dispatch: dispatchResult.dispatch,
       isolation,
     };
   }
@@ -126,7 +136,7 @@ export class AgentTaskCoordinator {
     return this.view(record, this.workspaceFor(record));
   }
 
-  revise(input: AgentRevisionInput): AgentSpawnResult {
+  async revise(input: AgentRevisionInput): Promise<AgentSpawnResult> {
     const record = this.requireOwned(input.taskId);
     if (record.status !== "input_required") {
       throw new Error("Only GPT workers waiting for review can be revised.");
@@ -139,16 +149,19 @@ export class AgentTaskCoordinator {
       inputResponse: `${CALLBACK_HASH_PREFIX}${hashToken(callbackToken)}`,
     });
     const workspace = this.workspaceFor(updated);
+    const dispatchPrompt = buildDispatchPrompt({
+      taskId: updated.taskId,
+      callbackToken,
+      workspaceId: updated.workspaceId!,
+      task: input.instruction,
+    });
+    const dispatchResult = await this.maybeDispatch(updated, dispatchPrompt);
 
     return {
-      ...this.view(updated, workspace),
+      ...this.view(dispatchResult.record, workspace),
       callbackToken,
-      dispatchPrompt: buildDispatchPrompt({
-        taskId: updated.taskId,
-        callbackToken,
-        workspaceId: updated.workspaceId!,
-        task: input.instruction,
-      }),
+      dispatchPrompt,
+      dispatch: dispatchResult.dispatch,
       isolation: workspace.mode === "worktree" ? "worktree" : "shared",
     };
   }
@@ -195,6 +208,30 @@ export class AgentTaskCoordinator {
       statusMessage: "Parent review approved.",
     });
     return this.view(updated, this.workspaceFor(updated));
+  }
+
+  private async maybeDispatch(
+    record: TaskRecord,
+    prompt: string,
+  ): Promise<{ record: TaskRecord; dispatch: "automatic" | "manual" }> {
+    if (!this.dispatcher) return { record, dispatch: "manual" };
+    if (!record.workspaceId) throw new Error(`GPT worker task ${record.taskId} has no workspace.`);
+
+    try {
+      await this.dispatcher({
+        taskId: record.taskId,
+        workspaceId: record.workspaceId,
+        prompt,
+      });
+      return { record, dispatch: "automatic" };
+    } catch (error) {
+      const failed = this.store.update(record.taskId, record.callerKey, {
+        status: "failed",
+        statusMessage: "GPT worker dispatch failed.",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { record: failed, dispatch: "automatic" };
+    }
   }
 
   private requireOwned(taskId: string): TaskRecord {
@@ -256,6 +293,7 @@ export function registerAgentTools(
     options.taskStore,
     options.workspaces,
     options.callerKey,
+    workspaceAgentDispatcherFromEnv(),
   );
 
   const spawnSchema = {
@@ -286,7 +324,7 @@ export function registerAgentTools(
 
   server.registerTool("agent.spawn", {
     title: "Spawn GPT worker task",
-    description: "Create a DevSpace-owned GPT worker task and automatically isolate write-capable work in a managed Git worktree. Returns a dispatch prompt for a Workspace Agent or another GPT runner.",
+    description: "Create a DevSpace-owned GPT worker task and automatically isolate write-capable work in a managed Git worktree. If the Workspace Agent trigger environment is configured, dispatch happens automatically; otherwise a dispatch prompt is returned for manual/native triggering.",
     inputSchema: spawnSchema,
   }, async (input) => textResult(await coordinator.spawn(input)));
 
@@ -300,7 +338,7 @@ export function registerAgentTools(
     title: "Revise GPT worker task",
     description: "Move a worker from review back to working and create a fresh dispatch capability for another GPT pass in the same workspace/worktree.",
     inputSchema: revisionSchema,
-  }, async (input) => textResult(coordinator.revise(input)));
+  }, async (input) => textResult(await coordinator.revise(input)));
 
   server.registerTool("agent.approve", {
     title: "Approve GPT worker task",
@@ -343,7 +381,7 @@ export function registerAgentTools(
     description: "ChatGPT-compatible alias for agent.revise.",
     inputSchema: revisionSchema,
     ...writeMeta,
-  }, async (input) => textResult(coordinator.revise(input)));
+  }, async (input) => textResult(await coordinator.revise(input)));
   registerAppTool(server, "agent_approve", {
     title: "Approve GPT worker task",
     description: "ChatGPT-compatible alias for agent.approve.",
