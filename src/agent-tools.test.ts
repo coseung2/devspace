@@ -71,6 +71,8 @@ test("agent spawn auto-isolates write-capable work and waits for parent review",
   assert.equal(spawned.status, "working");
   assert.match(spawned.dispatchPrompt, /Fix auth race/);
   assert.match(spawned.dispatchPrompt, new RegExp(spawned.taskId));
+  assert.match(spawned.dispatchPrompt, /gpt_worker_complete/);
+  assert.match(spawned.dispatchPrompt, /gpt_worker_fail/);
 
   assert.throws(() => coordinator.complete({
     taskId: spawned.taskId,

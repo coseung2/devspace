@@ -118,6 +118,19 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     assert.equal(initializeBody.id, 1);
     assert.ok(initializeBody.result);
 
+    const toolsListResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 19,
+      method: "tools/list",
+      params: {},
+    });
+    const toolsListBody = await readJsonRpc(toolsListResponse);
+    const toolNames = ((toolsListBody.result?.tools ?? []) as Array<{ name?: unknown }>)
+      .map((tool) => tool.name)
+      .filter((name): name is string => typeof name === "string");
+    assert.ok(toolNames.includes("gpt_worker_spawn"));
+    assert.ok(toolNames.includes("gpt_worker_complete"));
+
     // The former stateful route rejects this request with 400 because it has no session header.
     const openResponse = await postMcp(endpoint, accessToken, {
       jsonrpc: "2.0",
