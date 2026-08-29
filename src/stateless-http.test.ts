@@ -77,7 +77,8 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     });
     const accessToken = await issueAccessToken(config);
 
-    running = createServer(config);
+    const remoteOrigin = "chrome-extension://abcdefghijklmnop";
+    running = createServer(config, { remoteExtensionOrigins: [remoteOrigin] });
     httpServer = running.app.listen(0, config.host);
     await waitForListening(httpServer);
     const address = httpServer.address();
@@ -277,6 +278,206 @@ test("stateless authenticated HTTP requests share workspaces without session sta
     assert.equal(commandGetBody?.result?.status, "completed");
     assert.equal(commandGetBody?.result?.resultType, "complete");
 
+    const remoteSpawnResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 29,
+      method: "tools/call",
+      params: {
+        name: "worker.spawn",
+        arguments: {
+          workspaceId,
+          cmd: "node -e \"console.log('REMOTE_PROJECTION_OK')\"",
+          requireApproval: true,
+          yieldTimeMs: 30_000,
+        },
+        _meta: taskCapabilityMeta,
+      },
+    });
+    const remoteSpawnBody = await readJsonRpc(remoteSpawnResponse);
+    const remoteTaskId = String(remoteSpawnBody.result?.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const noAuthProjection = await fetch(`${workstationEndpoint}/v1/worker/snapshot`, {
+      headers: { origin: remoteOrigin },
+    });
+    assert.equal(noAuthProjection.status, 401);
+    assert.equal((await noAuthProjection.json()).error.code, "unauthorized");
+
+    const wrongOriginProjection = await fetch(`${workstationEndpoint}/v1/worker/snapshot`, {
+      headers: { authorization: `Bearer ${accessToken}`, origin: "chrome-extension://wrongorigin" },
+    });
+    assert.equal(wrongOriginProjection.status, 403);
+    assert.equal((await wrongOriginProjection.json()).error.code, "origin_not_allowed");
+
+    const wrongResourceToken = await issueAccessToken(config, new URL("https://other.example.com/mcp"));
+    const wrongResourceProjection = await fetch(`${workstationEndpoint}/v1/worker/snapshot`, {
+      headers: { authorization: `Bearer ${wrongResourceToken}`, origin: remoteOrigin },
+    });
+    assert.equal(wrongResourceProjection.status, 401);
+    assert.equal((await wrongResourceProjection.json()).error.code, "unauthorized");
+
+    const preflightProjection = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "OPTIONS",
+      headers: { origin: remoteOrigin, "access-control-request-method": "POST" },
+    });
+    assert.equal(preflightProjection.status, 204);
+    assert.equal(preflightProjection.headers.get("access-control-allow-origin"), remoteOrigin);
+
+    const remoteSnapshotResponse = await fetch(`${workstationEndpoint}/v1/worker/snapshot`, {
+      headers: { authorization: `Bearer ${accessToken}`, origin: remoteOrigin },
+    });
+    assert.equal(remoteSnapshotResponse.status, 200);
+    assert.equal(remoteSnapshotResponse.headers.get("access-control-allow-origin"), remoteOrigin);
+    const remoteSnapshot = await remoteSnapshotResponse.json() as {
+      protocolVersion: number;
+      revision: string;
+      connected: boolean;
+      tasks: Array<{ taskId: string; status: string; result?: { content?: Array<{ type: string; text?: string }> }; process?: { output?: string } }>;
+    };
+    assert.equal(remoteSnapshot.protocolVersion, 1);
+    assert.equal(remoteSnapshot.connected, true);
+    const remoteTask = remoteSnapshot.tasks.find((task) => task.taskId === remoteTaskId);
+    assert.ok(remoteTask);
+    assert.equal(remoteTask.status, "input_required");
+    assert.match(
+      remoteTask.process?.output ?? remoteTask.result?.content?.find((block) => block.type === "text")?.text ?? "",
+      /REMOTE_PROJECTION_OK/,
+    );
+
+    const staleAction = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        origin: remoteOrigin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        protocolVersion: 1,
+        action: "approve",
+        taskId: remoteTaskId,
+        idempotencyKey: "remote-stale-revision",
+        expectedRevision: "1-stale",
+      }),
+    });
+    assert.equal(staleAction.status, 409);
+    assert.equal((await staleAction.json()).error.code, "revision_conflict");
+
+    const actionBody = {
+      protocolVersion: 1,
+      action: "approve",
+      taskId: remoteTaskId,
+      idempotencyKey: "remote-approve-once",
+      expectedRevision: remoteSnapshot.revision,
+    };
+    const remoteActionResponse = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        origin: remoteOrigin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(actionBody),
+    });
+    assert.equal(remoteActionResponse.status, 200);
+    const remoteAction = await remoteActionResponse.json() as { protocolVersion: number; task: { status: string }; revision: string };
+    assert.equal(remoteAction.protocolVersion, 1);
+    assert.equal(remoteAction.task.status, "completed");
+
+    const replayResponse = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        origin: remoteOrigin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(actionBody),
+    });
+    assert.equal(replayResponse.status, 200);
+    assert.deepEqual(await replayResponse.json(), remoteAction);
+
+    const reusedKeyResponse = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        origin: remoteOrigin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ ...actionBody, action: "resume" }),
+    });
+    assert.equal(reusedKeyResponse.status, 409);
+    assert.equal((await reusedKeyResponse.json()).error.code, "idempotency_key_reused");
+
+    // A second, independently registered OAuth client holds the same Owner
+    // authority, so it must observe and control the same durable tasks. Under
+    // the previous clientId-scoped ownership this snapshot was empty and the
+    // action below returned task_not_found.
+    const secondClientToken = await issueAccessToken(config);
+    const sharedSpawnResponse = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 30,
+      method: "tools/call",
+      params: {
+        name: "worker.spawn",
+        arguments: {
+          workspaceId,
+          cmd: "node -e \"console.log('SHARED_OWNER_TASK')\"",
+          requireApproval: true,
+          yieldTimeMs: 30_000,
+        },
+        _meta: taskCapabilityMeta,
+      },
+    });
+    const sharedTaskId = String((await readJsonRpc(sharedSpawnResponse)).result?.taskId);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const sharedSnapshotResponse = await fetch(`${workstationEndpoint}/v1/worker/snapshot`, {
+      headers: { authorization: `Bearer ${secondClientToken}`, origin: remoteOrigin },
+    });
+    assert.equal(sharedSnapshotResponse.status, 200);
+    const sharedSnapshot = await sharedSnapshotResponse.json() as {
+      revision: string;
+      tasks: Array<{ taskId: string; status: string }>;
+    };
+    const sharedTask = sharedSnapshot.tasks.find((task) => task.taskId === sharedTaskId);
+    assert.ok(sharedTask, "the second OAuth client must see the task created by the first client");
+    assert.equal(sharedTask.status, "input_required");
+    assert.equal(sharedSnapshot.tasks.some((task) => task.taskId === remoteTaskId), true);
+
+    const sharedActionResponse = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${secondClientToken}`,
+        origin: remoteOrigin,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        protocolVersion: 1,
+        action: "approve",
+        taskId: sharedTaskId,
+        idempotencyKey: "shared-owner-approve",
+        expectedRevision: sharedSnapshot.revision,
+      }),
+    });
+    assert.equal(sharedActionResponse.status, 200);
+    assert.equal((await sharedActionResponse.json() as { task: { status: string } }).task.status, "completed");
+
+    // The first client's MCP task tools observe the second client's action.
+    const sharedTaskAfterAction = await postMcp(endpoint, accessToken, {
+      jsonrpc: "2.0",
+      id: 31,
+      method: "tasks/get",
+      params: { taskId: sharedTaskId, _meta: taskCapabilityMeta },
+    });
+    assert.equal((await readJsonRpc(sharedTaskAfterAction)).result?.status, "completed");
+
+    const unauthenticatedSharedAction = await fetch(`${workstationEndpoint}/v1/worker/action`, {
+      method: "POST",
+      headers: { origin: remoteOrigin, "content-type": "application/json" },
+      body: JSON.stringify({ protocolVersion: 1, action: "cancel", taskId: sharedTaskId }),
+    });
+    assert.equal(unauthenticatedSharedAction.status, 401);
+    assert.equal((await unauthenticatedSharedAction.json()).error.code, "unauthorized");
+
     // A stale stateful session would be rejected with 404; stateless requests ignore it.
     const readResponse = await postMcp(
       endpoint,
@@ -337,7 +538,10 @@ test("stateless authenticated HTTP requests share workspaces without session sta
   }
 });
 
-async function issueAccessToken(config: ReturnType<typeof loadConfig>): Promise<string> {
+async function issueAccessToken(
+  config: ReturnType<typeof loadConfig>,
+  resource?: URL,
+): Promise<string> {
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const provider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
   try {
@@ -355,7 +559,7 @@ async function issueAccessToken(config: ReturnType<typeof loadConfig>): Promise<
         redirectUri,
         codeChallenge: "test-code-challenge",
         scopes: config.oauth.scopes,
-        resource: mcpUrl,
+        resource: resource ?? mcpUrl,
       },
       expiresAtMs: Date.now() + 60_000,
     });
@@ -364,7 +568,7 @@ async function issueAccessToken(config: ReturnType<typeof loadConfig>): Promise<
       authorizationCode,
       undefined,
       redirectUri,
-      mcpUrl,
+      undefined,
     );
     return issued.access_token;
   } finally {

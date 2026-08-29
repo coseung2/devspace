@@ -3,8 +3,13 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  InvalidRequestError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { databasePath, openDatabase } from "./db/client.js";
+import { migrateDatabase, OWNER_CALLER_KEY } from "./db/migrations.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
 
@@ -18,10 +23,14 @@ const oauthConfig = {
 };
 const mcpUrl = new URL("https://agent.example.com/mcp");
 const redirectUri = "https://chatgpt.com/connector_platform_oauth_redirect";
+const rocheExtensionId = "gefkajhiepdopchmhaliiecdmfohgbce";
+const rocheRedirectHost = `${rocheExtensionId}.chromiumapp.org`;
 
 try {
   await testDatabaseConfiguration(join(root, "database-configuration"));
+  testOwnerCallerKeyMigration(join(root, "owner-caller-key"));
   testPersistenceAndTokenHashing(join(root, "persistence"));
+  testRedirectHostAllowlist(join(root, "redirect-hosts"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
@@ -47,6 +56,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 4, name: "workspace-conversation-bindings" },
       { version: 5, name: "mcp-tasks" },
       { version: 6, name: "mcp-task-approval" },
+      { version: 7, name: "mcp-task-owner-caller-key" },
     ]);
   } finally {
     database.close();
@@ -55,6 +65,77 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
   if (process.platform !== "win32") {
     assert.equal((await stat(stateDir)).mode & 0o777, 0o700);
     assert.equal((await stat(databasePath(stateDir))).mode & 0o777, 0o600);
+  }
+}
+
+/**
+ * Legacy task rows were owned by a per-OAuth-client caller key, so a task
+ * created by the ChatGPT client was invisible to any other authorized client.
+ * Re-running the migration on a database that still holds legacy rows must
+ * re-key them to the single owner caller key without touching any other field.
+ */
+function testOwnerCallerKeyMigration(stateDir: string): void {
+  const legacyRow = {
+    task_id: "task_legacy_client_scoped",
+    caller_key: "devspace-11111111-2222-3333-4444-555555555555",
+    operation: "worker.spawn",
+    workspace_id: "ws_legacy",
+    agent_id: null,
+    process_session_id: 7,
+    status: "input_required",
+    status_message: "Review and approval required.",
+    created_at: "2026-08-01T00:00:00.000Z",
+    updated_at: "2026-08-01T00:00:01.000Z",
+    poll_interval_ms: 1000,
+    ttl_ms: 86_400_000,
+    input_requests_json: JSON.stringify(["approve"]),
+    result_json: JSON.stringify({ content: [{ type: "text", text: "LEGACY_TASK_OUTPUT" }] }),
+    error: null,
+    cancel_requested: 0,
+    approval_required: 1,
+  };
+
+  const seeded = openDatabase(stateDir);
+  try {
+    seeded.sqlite
+      .prepare(`
+        insert into mcp_tasks (
+          task_id, caller_key, operation, workspace_id, agent_id, process_session_id,
+          status, status_message, created_at, updated_at, poll_interval_ms, ttl_ms,
+          input_requests_json, result_json, error, cancel_requested, approval_required
+        ) values (
+          @task_id, @caller_key, @operation, @workspace_id, @agent_id, @process_session_id,
+          @status, @status_message, @created_at, @updated_at, @poll_interval_ms, @ttl_ms,
+          @input_requests_json, @result_json, @error, @cancel_requested, @approval_required
+        )
+      `)
+      .run(legacyRow);
+    // Reproduce a database written before the owner-key migration existed.
+    seeded.sqlite.prepare("delete from devspace_schema_migrations where version = 7").run();
+    assert.equal(
+      seeded.sqlite.prepare("select caller_key from mcp_tasks where task_id = ?").pluck().get(legacyRow.task_id),
+      legacyRow.caller_key,
+    );
+  } finally {
+    seeded.close();
+  }
+
+  const migrated = openDatabase(stateDir);
+  try {
+    const row = migrated.sqlite
+      .prepare("select * from mcp_tasks where task_id = ?")
+      .get(legacyRow.task_id) as typeof legacyRow;
+    assert.deepEqual(row, { ...legacyRow, caller_key: OWNER_CALLER_KEY });
+    assert.equal(migrated.sqlite.prepare("select count(*) from mcp_tasks").pluck().get(), 1);
+
+    // The migration is idempotent and leaves already-owned rows untouched.
+    migrateDatabase(migrated.sqlite);
+    assert.deepEqual(
+      migrated.sqlite.prepare("select * from mcp_tasks where task_id = ?").get(legacyRow.task_id),
+      { ...legacyRow, caller_key: OWNER_CALLER_KEY },
+    );
+  } finally {
+    migrated.close();
   }
 }
 
@@ -113,6 +194,70 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
   } finally {
     restoredStore.close();
   }
+}
+
+function testRedirectHostAllowlist(stateDir: string): void {
+  const store = new SqliteOAuthStore(stateDir);
+  try {
+    const clients = new SqliteOAuthClientsStore(store, [
+      ...oauthConfig.allowedRedirectHosts,
+      rocheRedirectHost,
+    ]);
+
+    const rocheClient = clients.registerClient({
+      redirect_uris: [`https://${rocheRedirectHost}/roche-devspace-callback`],
+      client_name: "Roche Extension",
+    });
+    assert.equal(store.getClient(rocheClient.client_id)?.client_name, "Roche Extension");
+
+    const chatgptClient = clients.registerClient({ redirect_uris: [redirectUri] });
+    assert.ok(store.getClient(chatgptClient.client_id));
+
+    const loopbackClient = clients.registerClient({
+      redirect_uris: ["http://localhost:53211/callback", "http://127.0.0.1:53211/callback"],
+    });
+    assert.ok(store.getClient(loopbackClient.client_id));
+
+    const registeredBeforeRejection = countRegisteredClients(store);
+
+    assert.throws(
+      () =>
+        clients.registerClient({
+          redirect_uris: [
+            "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.chromiumapp.org/roche-devspace-callback",
+          ],
+        }),
+      InvalidRequestError,
+    );
+    assert.throws(
+      () =>
+        clients.registerClient({
+          redirect_uris: [`https://evil.${rocheRedirectHost}/roche-devspace-callback`],
+        }),
+      InvalidRequestError,
+    );
+    assert.throws(
+      () =>
+        clients.registerClient({
+          redirect_uris: [
+            `https://${rocheRedirectHost}/roche-devspace-callback`,
+            "https://attacker.example.com/callback",
+          ],
+        }),
+      InvalidRequestError,
+    );
+
+    assert.equal(countRegisteredClients(store), registeredBeforeRejection);
+  } finally {
+    store.close();
+  }
+}
+
+function countRegisteredClients(store: SqliteOAuthStore): number {
+  return store["database"].sqlite
+    .prepare("select count(*) from oauth_clients")
+    .pluck()
+    .get() as number;
 }
 
 function testExpiredTokenCleanup(stateDir: string): void {

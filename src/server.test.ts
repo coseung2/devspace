@@ -498,12 +498,12 @@ test("worker.spawn returns a durable Tasks extension handle and supports get upd
   assert.equal(cooperativelyCancelled.status, "cancelled");
 });
 
-test("task-backed command worker exposes terminal output and completes through worker.get", async (t) => {
+test("ChatGPT app aliases expose terminal output and complete through worker_get", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const opened = await callOpen(context.client, context.project);
   const workspaceId = String(structuredContent(opened).workspaceId);
   const spawned = await context.client.callTool({
-    name: "worker.spawn",
+    name: "worker_spawn",
     arguments: {
       workspaceId,
       cmd: "node -e \"setTimeout(() => console.log('TASK_DONE'), 50)\"",
@@ -513,7 +513,7 @@ test("task-backed command worker exposes terminal output and completes through w
   const task = JSON.parse(responseText(spawned)) as { taskId: string };
   await new Promise((resolve) => setTimeout(resolve, 150));
   const fetched = await context.client.callTool({
-    name: "worker.get",
+    name: "worker_get",
     arguments: { taskId: task.taskId },
   });
   const completed = JSON.parse(responseText(fetched)) as {

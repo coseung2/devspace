@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -55,10 +55,16 @@ import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { openDatabase } from "./db/client.js";
-import { SqliteTaskStore, type TaskStore } from "./tasks.js";
+import { OWNER_CALLER_KEY } from "./db/migrations.js";
+import { SqliteTaskStore, type TaskRecord, type TaskStore } from "./tasks.js";
 
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+const REMOTE_PROJECTION_PROTOCOL_VERSION = 1;
+const REMOTE_PROJECTION_SNAPSHOT_PATH = "/v1/worker/snapshot";
+const REMOTE_PROJECTION_ACTION_PATH = "/v1/worker/action";
+const REMOTE_PROJECTION_IDEMPOTENCY_ENTRIES = 200;
+const WORKER_ACTIONS = ["send_input", "resume", "approve", "cancel"] as const;
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
   destructiveHint: true,
@@ -276,6 +282,225 @@ function sendJsonRpcError(
     error: { code, message },
     id: null,
   });
+}
+
+type WorkerAction = (typeof WORKER_ACTIONS)[number];
+
+/**
+ * Remote projection origins are read from the environment because the
+ * projection is a transport boundary rather than a workspace capability.
+ * Only exact Chromium extension origins are accepted; wildcards are not.
+ */
+function validateRemoteExtensionOrigins(origins: readonly string[]): string[] {
+  const configured = origins
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const invalid = configured.filter((origin) => !/^chrome-extension:\/\/[a-z0-9]+$/i.test(origin));
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid DEVSPACE_REMOTE_EXTENSION_ORIGINS entries: ${invalid.join(", ")}. Use exact chrome-extension://<id> origins.`,
+    );
+  }
+  return Array.from(new Set(configured));
+}
+
+function remoteExtensionOrigins(env: NodeJS.ProcessEnv = process.env): string[] {
+  return validateRemoteExtensionOrigins((env.DEVSPACE_REMOTE_EXTENSION_ORIGINS ?? "")
+    .split(","));
+}
+
+function projectionRevision(tasks: readonly TaskRecord[]): string {
+  const hash = createHash("sha256");
+  for (const task of [...tasks].sort((a, b) => a.taskId.localeCompare(b.taskId))) {
+    hash.update(
+      [
+        task.taskId,
+        task.status,
+        task.updatedAt,
+        String(task.inputRequests.length),
+        task.cancelRequested ? "1" : "0",
+        String(task.processSessionId ?? ""),
+      ].join("\u0000"),
+    );
+    hash.update("\n");
+  }
+  return `${REMOTE_PROJECTION_PROTOCOL_VERSION}-${hash.digest("base64url").slice(0, 24)}`;
+}
+
+function sendProjectionError(
+  res: Response,
+  status: number,
+  code: string,
+  message: string,
+  extra: Record<string, unknown> = {},
+): void {
+  res.status(status).json({
+    protocolVersion: REMOTE_PROJECTION_PROTOCOL_VERSION,
+    error: { code, message },
+    ...extra,
+  });
+}
+
+interface WorkerProjectionDeps {
+  config: ServerConfig;
+  taskStore: TaskStore;
+  processSessions: ProcessSessionManager;
+}
+
+function isWorkerAction(value: string): value is WorkerAction {
+  return (WORKER_ACTIONS as readonly string[]).includes(value);
+}
+
+const remoteActionSchema = z.object({
+  protocolVersion: z.literal(REMOTE_PROJECTION_PROTOCOL_VERSION),
+  action: z.enum(WORKER_ACTIONS),
+  taskId: z.string().min(1),
+  workspaceId: z.string().min(1).optional(),
+  input: z.string().max(100_000).optional(),
+  idempotencyKey: z.string().min(1).max(200).optional(),
+  expectedRevision: z.string().min(1).max(200).optional(),
+});
+
+function remoteActionErrorMessage(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return "The action request is invalid.";
+  const path = issue.path.join(".");
+  return path ? `Invalid ${path}: ${issue.message}` : issue.message;
+}
+
+/**
+ * Advance a stored task to its observable state by polling the DevSpace-owned
+ * process session. Shared by the loopback and remote projections so both read
+ * the same durable execution truth.
+ */
+async function settleWorkerTask(
+  storedTask: TaskRecord,
+  deps: WorkerProjectionDeps,
+): Promise<{ task: TaskRecord; process?: ProcessSnapshot }> {
+  let task = storedTask;
+  let processSnapshot: ProcessSnapshot | undefined;
+  if (task.status === "working" && task.workspaceId && task.processSessionId !== undefined) {
+    try {
+      processSnapshot = await deps.processSessions.write({
+        workspaceId: task.workspaceId,
+        sessionId: task.processSessionId,
+        chars: "",
+        yieldTimeMs: 0,
+        maxOutputTokens: deps.config.processOutputMaxTokens,
+      });
+      if (!processSnapshot.running) {
+        const result = {
+          content: [{ type: "text", text: processSnapshot.output || `Process exited with code ${processSnapshot.exitCode ?? "unknown"}.` }],
+          structuredContent: {
+            sessionId: processSnapshot.sessionId,
+            running: processSnapshot.running,
+            exitCode: processSnapshot.exitCode,
+            signal: processSnapshot.signal,
+            wallTimeMs: processSnapshot.wallTimeMs,
+            outputTruncated: processSnapshot.outputTruncated,
+          },
+          isError: processSnapshot.exitCode !== 0,
+        };
+        task = deps.taskStore.update(task.taskId, task.callerKey, {
+          status: task.approvalRequired ? "input_required" : "completed",
+          statusMessage: task.approvalRequired
+            ? "Review and approval required."
+            : task.statusMessage,
+          result,
+        });
+      }
+    } catch {
+      task = deps.taskStore.update(task.taskId, task.callerKey, {
+        status: "failed",
+        error: "The process session is unavailable after DevSpace restart.",
+      });
+    }
+  }
+  return { task, process: processSnapshot };
+}
+
+function projectWorkerTask(task: TaskRecord, processSnapshot?: ProcessSnapshot) {
+  return {
+    taskId: task.taskId,
+    agentId: task.agentId,
+    operation: task.operation,
+    workspaceId: task.workspaceId,
+    status: task.status,
+    statusMessage: task.statusMessage,
+    createdAt: task.createdAt,
+    lastUpdatedAt: task.updatedAt,
+    ttlMs: task.ttlMs,
+    pollIntervalMs: task.pollIntervalMs,
+    inputRequests: task.status === "input_required" ? {
+      review: {
+        method: "elicitation/create",
+        params: {
+          mode: "form",
+          message: task.statusMessage ?? "Input required",
+          requestedSchema: {
+            type: "object",
+            properties: { approved: { type: "boolean" } },
+            required: ["approved"],
+          },
+        },
+      },
+    } : undefined,
+    result: task.status === "completed" || task.status === "input_required" ? task.result : undefined,
+    error: task.status === "failed" && task.error ? { code: -32603, message: task.error } : undefined,
+    process: task.processSessionId === undefined ? undefined : {
+      sessionId: task.processSessionId,
+      output: processSnapshot?.output,
+      outputTruncated: processSnapshot?.outputTruncated,
+      running: processSnapshot?.running,
+      exitCode: processSnapshot?.exitCode,
+      signal: processSnapshot?.signal,
+      wallTimeMs: processSnapshot?.wallTimeMs,
+    },
+  };
+}
+
+/**
+ * Apply a projection action to a task the caller already owns. Process
+ * interaction and durable state both stay inside DevSpace primitives.
+ */
+async function applyWorkerAction(
+  action: WorkerAction,
+  task: TaskRecord,
+  input: string | undefined,
+  deps: WorkerProjectionDeps,
+): Promise<TaskRecord> {
+  if (action === "cancel") {
+    if (task.workspaceId && task.processSessionId !== undefined) {
+      await deps.processSessions.write({
+        workspaceId: task.workspaceId,
+        sessionId: task.processSessionId,
+        chars: "\u0003",
+        yieldTimeMs: 0,
+        maxOutputTokens: deps.config.processOutputMaxTokens,
+      }).catch(() => undefined);
+    }
+    return deps.taskStore.requestCancel(task.taskId, task.callerKey);
+  }
+
+  if (action === "approve" || action === "resume") {
+    return deps.taskStore.update(task.taskId, task.callerKey, {
+      status: action === "approve" && task.approvalRequired && task.result !== undefined ? "completed" : "working",
+      statusMessage: action === "approve" ? "Review approved." : "Worker resumed.",
+      inputResponse: input,
+    });
+  }
+
+  const chars = input ?? "";
+  if (task.workspaceId && task.processSessionId !== undefined) {
+    await deps.processSessions.write({
+      workspaceId: task.workspaceId,
+      sessionId: task.processSessionId,
+      chars,
+      yieldTimeMs: 250,
+      maxOutputTokens: deps.config.processOutputMaxTokens,
+    });
+  }
+  return deps.taskStore.update(task.taskId, task.callerKey, { inputResponse: chars, status: "working" });
 }
 
 function requestLogFields(req: Request, config: ServerConfig): Record<string, unknown> {
@@ -707,7 +932,7 @@ export function createMcpServer(
   processSessions: ProcessSessionManager,
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   taskStore?: TaskStore,
-  callerKey = "anonymous",
+  callerKey = OWNER_CALLER_KEY,
 ): McpServer {
   const server = new McpServer(
     {
@@ -1683,6 +1908,11 @@ export function createMcpServer(
 
 export interface CreateServerOptions {
   incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
+  /**
+   * Exact Chromium extension origins allowed to use the remote workstation
+   * projection. Defaults to DEVSPACE_REMOTE_EXTENSION_ORIGINS.
+   */
+  remoteExtensionOrigins?: readonly string[];
 }
 
 export function createServer(
@@ -1774,6 +2004,8 @@ export function createServer(
     res.json({ ok: true, name: "devspace" });
   });
 
+  const projectionDeps: WorkerProjectionDeps = { config, taskStore, processSessions };
+
   const allowWorkstationRequest = (req: Request, res: Response): boolean => {
     const address = req.socket.remoteAddress;
     const isLoopback = address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
@@ -1800,82 +2032,8 @@ export function createServer(
   app.get("/worker.snapshot", async (req, res) => {
     if (!allowWorkstationRequest(req, res)) return;
     const tasks = await Promise.all(taskStore.listAll().map(async (storedTask) => {
-      let task = storedTask;
-      let processSnapshot: ProcessSnapshot | undefined;
-      if (task.status === "working" && task.workspaceId && task.processSessionId !== undefined) {
-        try {
-          processSnapshot = await processSessions.write({
-            workspaceId: task.workspaceId,
-            sessionId: task.processSessionId,
-            chars: "",
-            yieldTimeMs: 0,
-            maxOutputTokens: config.processOutputMaxTokens,
-          });
-          if (!processSnapshot.running) {
-            const result = {
-              content: [{ type: "text", text: processSnapshot.output || `Process exited with code ${processSnapshot.exitCode ?? "unknown"}.` }],
-              structuredContent: {
-                sessionId: processSnapshot.sessionId,
-                running: processSnapshot.running,
-                exitCode: processSnapshot.exitCode,
-                signal: processSnapshot.signal,
-                wallTimeMs: processSnapshot.wallTimeMs,
-                outputTruncated: processSnapshot.outputTruncated,
-              },
-              isError: processSnapshot.exitCode !== 0,
-            };
-            task = taskStore.update(task.taskId, task.callerKey, {
-              status: task.approvalRequired ? "input_required" : "completed",
-              statusMessage: task.approvalRequired
-                ? "Review and approval required."
-                : task.statusMessage,
-              result,
-            });
-          }
-        } catch {
-          task = taskStore.update(task.taskId, task.callerKey, {
-            status: "failed",
-            error: "The process session is unavailable after DevSpace restart.",
-          });
-        }
-      }
-      return {
-        taskId: task.taskId,
-        agentId: task.agentId,
-        operation: task.operation,
-        workspaceId: task.workspaceId,
-        status: task.status,
-        statusMessage: task.statusMessage,
-        createdAt: task.createdAt,
-        lastUpdatedAt: task.updatedAt,
-        ttlMs: task.ttlMs,
-        pollIntervalMs: task.pollIntervalMs,
-        inputRequests: task.status === "input_required" ? {
-          review: {
-            method: "elicitation/create",
-            params: {
-              mode: "form",
-              message: task.statusMessage ?? "Input required",
-              requestedSchema: {
-                type: "object",
-                properties: { approved: { type: "boolean" } },
-                required: ["approved"],
-              },
-            },
-          },
-        } : undefined,
-        result: task.status === "completed" ? task.result : undefined,
-        error: task.status === "failed" && task.error ? { code: -32603, message: task.error } : undefined,
-        process: task.processSessionId === undefined ? undefined : {
-          sessionId: task.processSessionId,
-          output: processSnapshot?.output,
-          outputTruncated: processSnapshot?.outputTruncated,
-          running: processSnapshot?.running,
-          exitCode: processSnapshot?.exitCode,
-          signal: processSnapshot?.signal,
-          wallTimeMs: processSnapshot?.wallTimeMs,
-        },
-      };
+      const settled = await settleWorkerTask(storedTask, projectionDeps);
+      return projectWorkerTask(settled.task, settled.process);
     }));
     res.json({
       connected: true,
@@ -1903,43 +2061,220 @@ export function createServer(
       return;
     }
     try {
-      if (action === "cancel") {
-        if (task.workspaceId && task.processSessionId !== undefined) {
-          await processSessions.write({
-            workspaceId: task.workspaceId,
-            sessionId: task.processSessionId,
-            chars: "\u0003",
-            yieldTimeMs: 0,
-            maxOutputTokens: config.processOutputMaxTokens,
-          }).catch(() => undefined);
-        }
-        taskStore.requestCancel(taskId, task.callerKey);
-      } else if (action === "approve" || action === "resume") {
-        taskStore.update(taskId, task.callerKey, {
-          status: action === "approve" && task.approvalRequired && task.result !== undefined ? "completed" : "working",
-          statusMessage: action === "approve" ? "Review approved." : "Worker resumed.",
-          inputResponse: typeof body?.input === "string" ? body.input : undefined,
-        });
-      } else if (action === "send_input") {
-        const input = typeof body?.input === "string" ? body.input : "";
-        if (task.workspaceId && task.processSessionId !== undefined) {
-          await processSessions.write({
-            workspaceId: task.workspaceId,
-            sessionId: task.processSessionId,
-            chars: input,
-            yieldTimeMs: 250,
-            maxOutputTokens: config.processOutputMaxTokens,
-          });
-        }
-        taskStore.update(taskId, task.callerKey, { inputResponse: input, status: "working" });
-      } else {
+      if (!isWorkerAction(action)) {
         res.status(400).json({ error: `Unsupported action: ${action}` });
         return;
       }
+      await applyWorkerAction(
+        action,
+        task,
+        typeof body?.input === "string" ? body.input : action === "send_input" ? "" : undefined,
+        projectionDeps,
+      );
       res.json({ ok: true, task: taskStore.get(taskId, task.callerKey) });
     } catch (error) {
       res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
     }
+  });
+
+  const remoteOrigins = new Set(
+    options.remoteExtensionOrigins === undefined
+      ? remoteExtensionOrigins()
+      : validateRemoteExtensionOrigins(options.remoteExtensionOrigins),
+  );
+  const remoteIdempotency = new Map<string, { fingerprint: string; body: Record<string, unknown> }>();
+
+  const allowRemoteProjectionOrigin = (req: Request, res: Response): boolean => {
+    const origin = req.header("origin");
+    if (remoteOrigins.size === 0) {
+      sendProjectionError(
+        res,
+        403,
+        "remote_projection_disabled",
+        "No remote workstation extension origin is configured.",
+      );
+      return false;
+    }
+    if (!origin || !remoteOrigins.has(origin)) {
+      sendProjectionError(
+        res,
+        403,
+        "origin_not_allowed",
+        "The request origin is not a configured workstation extension origin.",
+      );
+      return false;
+    }
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Max-Age", "600");
+    return true;
+  };
+
+  /**
+   * Authenticate a remote projection request and return the validated OAuth
+   * client identity. Task scope is the single owner caller key, because this
+   * server is single-user and every OAuth client had to be approved with the
+   * same Owner password; the returned clientId only namespaces idempotency keys.
+   * This uses the shared OAuth verifier directly instead of the MCP bearer
+   * middleware so failures return the projection's own bounded error shape.
+   */
+  const authenticateRemoteProjection = async (
+    req: Request,
+    res: Response,
+  ): Promise<string | undefined> => {
+    const denied = (reason: string, message: string): undefined => {
+      logEvent(config.logging, "warn", "auth_denied", {
+        requestId: res.locals.requestId as string | undefined,
+        method: req.method,
+        path: requestPath(req),
+        reason,
+        ...requestLogFields(req, config),
+      });
+      res.setHeader(
+        "WWW-Authenticate",
+        `Bearer resource_metadata="${getOAuthProtectedResourceMetadataUrl(resourceServerUrl)}"`,
+      );
+      sendProjectionError(res, 401, "unauthorized", message);
+      return undefined;
+    };
+
+    const [scheme, token] = (req.header("authorization") ?? "").split(" ");
+    if (scheme?.toLowerCase() !== "bearer" || !token) {
+      return denied("missing_bearer_token", "A DevSpace OAuth bearer token is required.");
+    }
+
+    let auth: Awaited<ReturnType<typeof oauthProvider.verifyAccessToken>>;
+    try {
+      auth = await oauthProvider.verifyAccessToken(token);
+    } catch {
+      return denied("invalid_token", "The access token is invalid or expired.");
+    }
+
+    const requiredScope = config.oauth.scopes[0] ?? "devspace";
+    if (!auth.scopes.includes(requiredScope)) {
+      return denied("insufficient_scope", "The access token is missing the required DevSpace scope.");
+    }
+    if (
+      !auth.resource
+      || !checkResourceAllowed({ requestedResource: auth.resource, configuredResource: resourceServerUrl })
+    ) {
+      return denied("invalid_oauth_resource", "The access token was not issued for this DevSpace resource.");
+    }
+
+    return auth.clientId;
+  };
+
+  const settleCallerTasks = async (
+    workspaceId?: string,
+  ): Promise<Array<{ task: TaskRecord; process?: ProcessSnapshot }>> =>
+    await Promise.all(
+      taskStore.list(OWNER_CALLER_KEY, workspaceId).map((storedTask) => settleWorkerTask(storedTask, projectionDeps)),
+    );
+
+  app.options(REMOTE_PROJECTION_SNAPSHOT_PATH, (req, res) => {
+    if (!allowRemoteProjectionOrigin(req, res)) return;
+    res.sendStatus(204);
+  });
+  app.get(REMOTE_PROJECTION_SNAPSHOT_PATH, async (req, res) => {
+    if (!allowRemoteProjectionOrigin(req, res)) return;
+    const clientId = await authenticateRemoteProjection(req, res);
+    if (clientId === undefined) return;
+
+    const workspaceId = typeof req.query.workspaceId === "string" ? req.query.workspaceId : undefined;
+    const settled = await settleCallerTasks(workspaceId);
+    res.json({
+      protocolVersion: REMOTE_PROJECTION_PROTOCOL_VERSION,
+      revision: projectionRevision(settled.map((entry) => entry.task)),
+      connected: true,
+      generatedAt: new Date().toISOString(),
+      tasks: settled.map((entry) => projectWorkerTask(entry.task, entry.process)),
+    });
+  });
+
+  app.options(REMOTE_PROJECTION_ACTION_PATH, (req, res) => {
+    if (!allowRemoteProjectionOrigin(req, res)) return;
+    res.sendStatus(204);
+  });
+  app.post(REMOTE_PROJECTION_ACTION_PATH, async (req, res) => {
+    if (!allowRemoteProjectionOrigin(req, res)) return;
+    const clientId = await authenticateRemoteProjection(req, res);
+    if (clientId === undefined) return;
+
+    const parsed = remoteActionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendProjectionError(res, 400, "invalid_request", remoteActionErrorMessage(parsed.error));
+      return;
+    }
+    const request = parsed.data;
+    const idempotencyScope = request.idempotencyKey === undefined
+      ? undefined
+      : `${clientId}\u0000${request.idempotencyKey}`;
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify([request.action, request.taskId, request.workspaceId ?? null, request.input ?? null]))
+      .digest("base64url");
+
+    if (idempotencyScope) {
+      const replayed = remoteIdempotency.get(idempotencyScope);
+      if (replayed) {
+        if (replayed.fingerprint !== fingerprint) {
+          sendProjectionError(
+            res,
+            409,
+            "idempotency_key_reused",
+            "This idempotency key was already used for a different action.",
+          );
+          return;
+        }
+        res.json(replayed.body);
+        return;
+      }
+    }
+
+    const settled = await settleCallerTasks(request.workspaceId);
+    const revision = projectionRevision(settled.map((entry) => entry.task));
+    if (request.expectedRevision !== undefined && request.expectedRevision !== revision) {
+      sendProjectionError(res, 409, "revision_conflict", "The workstation projection has changed.", {
+        revision,
+        tasks: settled.map((entry) => projectWorkerTask(entry.task, entry.process)),
+      });
+      return;
+    }
+
+    const target = settled.find((entry) => entry.task.taskId === request.taskId);
+    if (!target) {
+      sendProjectionError(res, 404, "task_not_found", "No task with that ID is available on this workstation.");
+      return;
+    }
+
+    let updated: TaskRecord;
+    try {
+      updated = await applyWorkerAction(
+        request.action,
+        target.task,
+        request.action === "send_input" ? request.input ?? "" : request.input,
+        projectionDeps,
+      );
+    } catch (error) {
+      sendProjectionError(res, 409, "task_conflict", errorText(error), { revision });
+      return;
+    }
+
+    const body = {
+      protocolVersion: REMOTE_PROJECTION_PROTOCOL_VERSION,
+      revision: projectionRevision(taskStore.list(OWNER_CALLER_KEY, request.workspaceId)),
+      task: projectWorkerTask(updated),
+    };
+    if (idempotencyScope) {
+      remoteIdempotency.set(idempotencyScope, { fingerprint, body });
+      while (remoteIdempotency.size > REMOTE_PROJECTION_IDEMPOTENCY_ENTRIES) {
+        const oldest = remoteIdempotency.keys().next();
+        if (oldest.done) break;
+        remoteIdempotency.delete(oldest.value);
+      }
+    }
+    res.json(body);
   });
 
   app.all("/mcp", async (req, res) => {
@@ -2007,7 +2342,7 @@ export function createServer(
         processSessions,
         incomingArtifactAdapters,
         taskStore,
-        req.auth?.clientId ?? "anonymous",
+        OWNER_CALLER_KEY,
       );
       activeMcpRequests.add(closeRequestServer);
       await mcpServer.connect(transport);

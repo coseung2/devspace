@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
@@ -30,6 +31,20 @@ const tasksCancelRequestSchema = z.object({
   method: z.literal("tasks/cancel"),
   params: z.object({ taskId: taskIdSchema, _meta: z.record(z.string(), z.unknown()).optional() }),
 });
+const workerReadAppMeta = {
+  _meta: {
+    "openai/toolInvocation/invoking": "Reading DevSpace worker state...",
+    "openai/toolInvocation/invoked": "DevSpace worker state ready",
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+};
+const workerWriteAppMeta = {
+  _meta: {
+    "openai/toolInvocation/invoking": "Updating DevSpace worker...",
+    "openai/toolInvocation/invoked": "DevSpace worker updated",
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+};
 
 export interface TaskTools {
   snapshot(callerKey?: string): Promise<unknown>;
@@ -369,6 +384,129 @@ export function registerTaskTools(
     if (record.status === "working" || record.status === "input_required") {
       throw new Error("Only terminal workers can be closed.");
     }
+    return { content: [{ type: "text", text: JSON.stringify(taskView(record)) }] };
+  });
+
+  // ChatGPT Apps currently expose App SDK tools, while the canonical MCP task
+  // contract above intentionally keeps its dotted worker.* names. Register
+  // underscore aliases through the App SDK so browser clients can orchestrate
+  // the same durable DevSpace workers without duplicating execution state.
+  registerAppTool(server, "worker_catalog", {
+    title: "List worker runtimes",
+    description: "ChatGPT-compatible alias for worker.catalog. List the execution runtimes exposed by this DevSpace instance.",
+    inputSchema: {},
+    ...workerReadAppMeta,
+  }, async () => ({
+    content: [{ type: "text", text: JSON.stringify({
+      workers: [{ id: "command", label: "Workspace command worker", taskSupport: "optional", durableState: true }],
+      contract: ["worker_catalog", "worker_spawn", "worker_get", "worker_send_input", "worker_resume", "worker_approve", "worker_cancel", "worker_close"],
+      canonicalContract: ["worker.catalog", "worker.spawn", "worker.get", "worker.send_input", "worker.resume", "worker.approve", "worker.cancel", "worker.close"],
+    }) }],
+    structuredContent: { workers: [{ id: "command", label: "Workspace command worker", taskSupport: "optional", durableState: true }] },
+  }));
+
+  registerAppTool(server, "worker_spawn", {
+    title: "Spawn worker",
+    description: "ChatGPT-compatible alias for worker.spawn. Start a workspace command as a durable task-backed worker owned by DevSpace.",
+    inputSchema: {
+      workspaceId: z.string().min(1),
+      cmd: z.string().min(1),
+      instruction: z.string().optional(),
+      model: z.string().optional(),
+      thinking: z.string().optional(),
+      requireApproval: z.boolean().optional().describe("Pause in input_required after a successful command until approved."),
+      tty: z.boolean().optional(),
+      columns: z.number().int().min(1).max(1_000).optional(),
+      rows: z.number().int().min(1).max(1_000).optional(),
+      workingDirectory: z.string().optional(),
+      yieldTimeMs: z.number().int().min(0).max(30_000).optional(),
+      maxOutputTokens: z.number().int().positive().max(options.config.processOutputMaxTokens).optional(),
+    },
+    ...workerWriteAppMeta,
+  }, async (input) => ({ content: [{ type: "text", text: JSON.stringify(await spawn(input as ProcessInput & { instruction?: string; model?: string; thinking?: string })) }] }));
+
+  registerAppTool(server, "worker_get", {
+    title: "Get worker",
+    description: "ChatGPT-compatible alias for worker.get. Read a task-backed worker and its latest process snapshot.",
+    inputSchema: { taskId: taskIdSchema },
+    ...workerReadAppMeta,
+  }, async ({ taskId }) => ({ content: [{ type: "text", text: JSON.stringify(await getTask(taskId)) }] }));
+
+  registerAppTool(server, "worker_send_input", {
+    title: "Send worker input",
+    description: "ChatGPT-compatible alias for worker.send_input. Send input to a running worker process.",
+    inputSchema: { taskId: taskIdSchema, chars: z.string() },
+    ...workerWriteAppMeta,
+  }, async ({ taskId, chars }) => {
+    const owner = callerKey;
+    const record = store.get(taskId, owner);
+    if (!record) throw new Error(`Task ${taskId} not found.`);
+    if (record.workspaceId === undefined || record.processSessionId === undefined) {
+      return { content: [{ type: "text", text: JSON.stringify(taskView(store.update(taskId, owner, { inputResponse: chars }))) }] };
+    }
+    const snapshot = await options.processSessions.write({
+      workspaceId: record.workspaceId,
+      sessionId: record.processSessionId,
+      chars,
+      yieldTimeMs: 250,
+      maxOutputTokens: options.config.processOutputMaxTokens,
+    });
+    const updated = store.update(taskId, owner, {
+      inputResponse: chars,
+      status: snapshot.running ? "working" : record.approvalRequired ? "input_required" : "completed",
+      statusMessage: !snapshot.running && record.approvalRequired ? "Review and approval required." : record.statusMessage,
+      result: snapshot.running ? undefined : processResultPayload(snapshot),
+    });
+    return { content: [{ type: "text", text: JSON.stringify(taskView(updated, snapshot)) }] };
+  });
+
+  registerAppTool(server, "worker_resume", {
+    title: "Resume worker",
+    description: "ChatGPT-compatible alias for worker.resume. Resume a worker after an input checkpoint.",
+    inputSchema: { taskId: taskIdSchema },
+    ...workerWriteAppMeta,
+  }, async ({ taskId }) => {
+    const owner = callerKey;
+    const record = store.get(taskId, owner);
+    if (!record) throw new Error(`Task ${taskId} not found.`);
+    if (record.status !== "input_required") throw new Error("Only input-required workers can be resumed.");
+    return { content: [{ type: "text", text: JSON.stringify(taskView(store.update(taskId, owner, { status: "working", statusMessage: "Worker resumed." }))) }] };
+  });
+
+  registerAppTool(server, "worker_approve", {
+    title: "Approve worker",
+    description: "ChatGPT-compatible alias for worker.approve. Approve a worker at a review checkpoint.",
+    inputSchema: { taskId: taskIdSchema },
+    ...workerWriteAppMeta,
+  }, async ({ taskId }) => {
+    const owner = callerKey;
+    const record = store.get(taskId, owner);
+    if (!record) throw new Error(`Task ${taskId} not found.`);
+    if (record.status !== "input_required") throw new Error("Only input-required workers can be approved.");
+    const updated = store.update(taskId, owner, {
+      status: record.approvalRequired && record.result !== undefined ? "completed" : "working",
+      statusMessage: "Review approved.",
+    });
+    return { content: [{ type: "text", text: JSON.stringify(taskView(updated)) }] };
+  });
+
+  registerAppTool(server, "worker_cancel", {
+    title: "Cancel worker",
+    description: "ChatGPT-compatible alias for worker.cancel. Request cooperative cancellation of a worker.",
+    inputSchema: { taskId: taskIdSchema },
+    ...workerWriteAppMeta,
+  }, async ({ taskId }) => ({ content: [{ type: "text", text: JSON.stringify(await cancelTask(taskId)) }] }));
+
+  registerAppTool(server, "worker_close", {
+    title: "Close worker",
+    description: "ChatGPT-compatible alias for worker.close. Close a terminal worker while retaining durable task history.",
+    inputSchema: { taskId: taskIdSchema },
+    ...workerWriteAppMeta,
+  }, async ({ taskId }) => {
+    const owner = callerKey;
+    const record = store.get(taskId, owner);
+    if (!record) throw new Error(`Task ${taskId} not found.`);
+    if (record.status === "working" || record.status === "input_required") throw new Error("Only terminal workers can be closed.");
     return { content: [{ type: "text", text: JSON.stringify(taskView(record)) }] };
   });
 

@@ -1,5 +1,18 @@
 import type Database from "better-sqlite3";
 
+/**
+ * The single stable caller key that owns every MCP task on this server.
+ *
+ * DevSpace is a single-user, Owner-approved server: every OAuth client that
+ * holds a token for this resource was approved with the same Owner password and
+ * therefore has the same workspace authority. Task ownership is keyed to that
+ * one owner instead of the OAuth `clientId`, so the ChatGPT app and an
+ * independently authorized browser extension observe and control the same
+ * durable tasks. `clientId` stays a per-client idempotency namespace and audit
+ * value only.
+ */
+export const OWNER_CALLER_KEY = "devspace-owner";
+
 interface Migration {
   version: number;
   name: string;
@@ -36,6 +49,11 @@ const migrations: Migration[] = [
     version: 6,
     name: "mcp-task-approval",
     up: migrateMcpTaskApproval,
+  },
+  {
+    version: 7,
+    name: "mcp-task-owner-caller-key",
+    up: migrateMcpTaskOwnerCallerKey,
   },
 ];
 
@@ -240,6 +258,18 @@ function migrateMcpTasks(sqlite: Database.Database): void {
 
 function migrateMcpTaskApproval(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "mcp_tasks", "approval_required", "integer not null default 0");
+}
+
+/**
+ * Re-key existing tasks from legacy per-OAuth-client caller keys to the single
+ * owner caller key. Every other column is left untouched, so task identity,
+ * status, results, and timestamps survive. A new database reaches the same state
+ * because `mcp_tasks` is still empty when this runs.
+ */
+function migrateMcpTaskOwnerCallerKey(sqlite: Database.Database): void {
+  sqlite
+    .prepare("update mcp_tasks set caller_key = ? where caller_key <> ?")
+    .run(OWNER_CALLER_KEY, OWNER_CALLER_KEY);
 }
 
 function addColumnIfMissing(

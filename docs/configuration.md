@@ -39,6 +39,7 @@ npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
 | `DEVSPACE_STATE_DIR` | Directory for SQLite state. Defaults to `~/.local/share/devspace`. |
+| `DEVSPACE_REMOTE_EXTENSION_ORIGINS` | Comma-separated exact `chrome-extension://<id>` origins allowed to use the authenticated Roche remote worker projection. Empty by default (disabled). |
 
 Workspace aliases may also be persisted in `~/.devspace/config.json`:
 
@@ -119,6 +120,14 @@ MCP clients discover metadata from:
 /.well-known/oauth-authorization-server
 ```
 
+`DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS` is matched as an exact hostname list.
+Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) are always accepted. Every
+other host must be listed literally: wildcards, suffix patterns, and parent
+domains are not accepted, so `chromiumapp.org` does not authorize
+`<extension-id>.chromiumapp.org`, and a listed host does not authorize a
+subdomain of it. Dynamic client registration is rejected when any single
+`redirect_uris` entry fails this check.
+
 ## Tool Modes
 
 `DEVSPACE_TOOL_MODE` controls the tool surface.
@@ -138,6 +147,77 @@ tokens, while retaining the full in-memory process buffer for later polls.
 `DEVSPACE_TOOL_MODE` is unset: `1` selects `minimal` and `0` selects `full`.
 The `codex` mode must be selected through `DEVSPACE_TOOL_MODE` and always uses
 its fixed short tool names regardless of `DEVSPACE_TOOL_NAMING`.
+
+## Roche Remote Worker Projection
+
+The Roche browser extension reads the DevSpace-owned task and process graph
+through these authenticated endpoints:
+
+```text
+GET  /v1/worker/snapshot
+POST /v1/worker/action
+```
+
+Both endpoints require an OAuth bearer token with the configured DevSpace scope
+and an exact origin listed in `DEVSPACE_REMOTE_EXTENSION_ORIGINS`. The snapshot
+contains `protocolVersion: 1`, an Owner/workspace-scoped task list, and a
+revision. Actions accept `send_input`, `resume`, `approve`, or `cancel`, plus an
+`idempotencyKey` and optional `expectedRevision`. A revision conflict is
+returned instead of applying an action against stale UI state.
+
+Tasks are owned by one Owner task scope rather than by OAuth `clientId`, so a
+task created from the ChatGPT app is visible and actionable from the extension
+and vice versa. `clientId` only namespaces `idempotencyKey` values. Existing
+databases are re-keyed by the `mcp-task-owner-caller-key` migration, which
+preserves every task field; new databases start in the same state. This shared
+scope is safe only because DevSpace is single-user and every client requires the
+same Owner approval, and it means any leaked bearer token can read and act on
+every Owner-scoped task. See `docs/security.md`.
+
+Configure the production extension ID explicitly; do not use a wildcard:
+
+```bash
+DEVSPACE_REMOTE_EXTENSION_ORIGINS="chrome-extension://abcdefghijklmnop" \
+npx @waishnav/devspace serve
+```
+
+### Two independent extension allowlists
+
+The extension needs two separate server allowlists. They hold different kinds of
+values and neither one implies the other:
+
+| Variable | Value kind | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_REMOTE_EXTENSION_ORIGINS` | exact `chrome-extension://<id>` origin | authorizes projection requests from the extension |
+| `DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS` | exact hostname | authorizes the OAuth callback host used during registration and authorization |
+
+For the fixed development extension ID `gefkajhiepdopchmhaliiecdmfohgbce`, the
+origin is `chrome-extension://gefkajhiepdopchmhaliiecdmfohgbce` and the redirect
+host is `gefkajhiepdopchmhaliiecdmfohgbce.chromiumapp.org`. Add the redirect host
+alongside the hosts already authorized for other clients rather than replacing
+them:
+
+```bash
+DEVSPACE_REMOTE_EXTENSION_ORIGINS="chrome-extension://gefkajhiepdopchmhaliiecdmfohgbce" \
+DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS="chatgpt.com,localhost,127.0.0.1,gefkajhiepdopchmhaliiecdmfohgbce.chromiumapp.org" \
+npx @waishnav/devspace serve
+```
+
+Neither list accepts wildcards or pattern entries. `chrome-extension://*`,
+`*.chromiumapp.org`, and a bare `chromiumapp.org` are all rejected or simply do
+not match, so a different extension's `<other-id>.chromiumapp.org` callback
+cannot register against this server. Setting only the origin leaves the OAuth
+authorization flow failing at registration; setting only the redirect host
+leaves `/v1/worker/snapshot` and `/v1/worker/action` rejecting the extension.
+
+Issued bearer and refresh tokens stay inside the extension in
+`chrome.storage.session`. DevSpace stores only their hashes, and tokens are
+never logged, displayed, exported, or written to any other extension storage
+area.
+
+The legacy `/worker.snapshot` and `/worker.action` endpoints remain loopback-
+only development routes. Remote projection state is not a second task store;
+the SQLite task store and DevSpace process manager remain authoritative.
 
 Codex-mode commands run without a PTY by default. Set `tty: true` on
 `exec_command` for interactive terminal programs. PTY support uses the optional
