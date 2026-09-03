@@ -144,7 +144,11 @@ Set `DEVSPACE_SKILLS=0` to hide skills from workspace output.
 
 ## Tool Names
 
-DevSpace exposes these tool names:
+DevSpace exposes one of three tool surfaces. The host must use only the names
+actually advertised by the connected server; it must not assume that both
+surfaces are installed.
+
+The legacy/minimal surface exposes these tool names:
 
 - `open_workspace`
 - `read`
@@ -157,6 +161,9 @@ By default, DevSpace also runs in `DEVSPACE_TOOL_MODE=minimal`, so dedicated
 such as `rg`, `find`, and `ls` for search and directory inspection.
 
 Use `DEVSPACE_TOOL_MODE=full` to restore dedicated search and directory tools.
+Full mode also exposes the process-session tools `exec_command` and
+`write_stdin`, so web clients can keep using the legacy `bash` tool while
+long-running builds use a session that can be polled.
 
 The experimental Codex-style surface is enabled with
 `DEVSPACE_TOOL_MODE=codex`. It exposes:
@@ -171,6 +178,14 @@ In this mode, `write`, `edit`, `bash`, `grep`, `glob`, and `ls` are not
 registered. `exec_command` returns a process session ID when a command is still
 running after its yield window. Use `write_stdin` to poll it, send input, resize
 a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
+
+If `open_workspace` and `read` work but a command tool returns `Tool not found`,
+the connected host has stale or incompatible tool metadata. Reconnect or refresh
+the MCP plugin so it can discover the server's current tool surface. In codex
+mode, `bash` and `ls` are intentionally absent; in full mode, `bash`, `ls`,
+`exec_command`, and `write_stdin` should all be present. Do not treat a missing
+tool as a project CLI or Flutter installation failure until a server-advertised
+command tool succeeds.
 
 ## Show Changes
 

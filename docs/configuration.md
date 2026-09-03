@@ -135,7 +135,7 @@ subdomain of it. Dynamic client registration is rejected when any single
 | Value | Behavior |
 | --- | --- |
 | `minimal` | Default. Exposes `open_workspace`, `read`, `write`, `edit`, and `bash`. Clients use `bash` with tools such as `rg`, `find`, and `ls` for inspection. |
-| `full` | Exposes the minimal tools plus dedicated `grep`, `glob`, and `ls` tools. |
+| `full` | Exposes the legacy tools plus dedicated `grep`, `glob`, `ls`, `exec_command`, and `write_stdin` tools. |
 | `codex` | Experimental. Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell tools are hidden. |
 
 `DEVSPACE_OUTPUT_PROFILE` controls the amount of process output returned to the

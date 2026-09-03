@@ -104,6 +104,50 @@ test("workspace reuse is the normal model path", async (t) => {
   }
 });
 
+test("full mode exposes legacy and process tools while codex stays isolated", async (t) => {
+  const fullContext = await fixture(t, { toolMode: "full" });
+  const fullToolNames = new Set((await fullContext.client.listTools()).tools.map((tool) => tool.name));
+  for (const name of ["open_workspace", "read", "write", "edit", "grep", "glob", "ls", "bash", "exec_command", "write_stdin"]) {
+    assert.equal(fullToolNames.has(name), true, `full mode should expose ${name}`);
+  }
+  assert.equal(fullToolNames.has("apply_patch"), false);
+
+  const codexContext = await fixture(t, { toolMode: "codex" });
+  const codexToolNames = new Set((await codexContext.client.listTools()).tools.map((tool) => tool.name));
+  for (const name of ["open_workspace", "read", "apply_patch", "exec_command", "write_stdin"]) {
+    assert.equal(codexToolNames.has(name), true, `codex mode should expose ${name}`);
+  }
+  for (const name of ["write", "edit", "grep", "glob", "ls", "bash"]) {
+    assert.equal(codexToolNames.has(name), false, `codex mode should hide ${name}`);
+  }
+});
+
+test("full mode process tools execute and poll through the shared session manager", async (t) => {
+  const context = await fixture(t, { toolMode: "full" });
+  const opened = await callOpen(context.client, context.project);
+  const workspaceId = String(structuredContent(opened).workspaceId);
+  const command = process.platform === "win32"
+    ? `"${process.execPath}" -e "setTimeout(() => console.log('full-ok'), 100)"`
+    : `${JSON.stringify(process.execPath)} -e "setTimeout(() => console.log('full-ok'), 100)"`;
+
+  const started = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId, cmd: command, yieldTimeMs: 0 },
+  });
+  const startedStructured = structuredContent(started);
+  assert.equal(startedStructured.running, true);
+  assert.equal(typeof startedStructured.sessionId, "number");
+
+  const completed = await context.client.callTool({
+    name: "write_stdin",
+    arguments: { workspaceId, sessionId: startedStructured.sessionId, yieldTimeMs: 2_000 },
+  });
+  const completedStructured = structuredContent(completed);
+  assert.equal(completedStructured.running, false);
+  assert.equal(completedStructured.exitCode, 0);
+  assert.match(responseText(completed), /full-ok/);
+});
+
 test("task-context tools persist centrally and return only matching entries", async (t) => {
   const context = await fixture(t);
   const opened = await callOpen(context.client, context.project, "chat-1");

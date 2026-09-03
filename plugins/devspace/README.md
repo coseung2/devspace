@@ -9,7 +9,7 @@ DevSpace is the workspace-scoped MCP plugin for development repositories hosted 
 - Authentication: OAuth 2.1 authorization code with PKCE, DCR, rotating refresh tokens, and hashed token persistence
 - VM service account: `devspace`
 - Workspace root: `/home/devspace/projects`
-- Supported repositories: `opencodex`, `aura`, and `aura-board`
+- Representative repositories: `opencodex`, `aura`, and `aura-board`; any repository under the configured allowed root can be opened when permitted by the server.
 
 The plugin contains only the DevSpace manifest, MCP registration, and workspace skill. Runtime execution is provided by the repository's main DevSpace server and its `devspace-mcp.service` deployment.
 

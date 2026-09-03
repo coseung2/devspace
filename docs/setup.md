@@ -84,8 +84,8 @@ npx @waishnav/devspace serve
 
 ### Open projects by alias
 
-If the DevSpace host contains fixed projects such as Aura and Aura Board, add
-short names once:
+If the DevSpace host contains frequently used projects such as Aura and Aura
+Board, add short names once:
 
 ```bash
 devspace config set workspaceAlias aura /actual/devspace/projects/aura
@@ -98,6 +98,9 @@ to the DevSpace installation, not to this package's documentation.
 
 The coding host can then call `open_workspace` with `{ "alias": "aura" }` or
 `{ "alias": "aura-board" }` instead of needing to know the VM filesystem path.
+Other repositories under the allowed project root can be opened by their
+workspace-relative or absolute path; these examples are not an exhaustive
+project list.
 
 ## Approve The Client
 
